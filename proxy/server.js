@@ -1457,6 +1457,47 @@ async function startServer() {
         }
     });
 
+    // DELETE /api/superadmin/tenants/:tenantId - Delete tenant permanently
+    app.delete('/api/superadmin/tenants/:tenantId', async (req, res) => {
+        const { tenantId } = req.params;
+        const { confirmDelete } = req.body;
+        
+        try {
+            // Get tenant info
+            const tenant = await superadminDb.get('SELECT * FROM tenants WHERE id = ?', tenantId);
+            if (!tenant) {
+                return res.status(404).json({ error: 'Tenant not found' });
+            }
+            
+            // Require confirmation
+            if (confirmDelete !== tenant.slug) {
+                return res.status(400).json({ error: 'Confirmation slug does not match' });
+            }
+            
+            // Close tenant database connection if open
+            await closeTenantDb(tenantId);
+            
+            // Delete tenant database file
+            if (tenant.database_path && fs.existsSync(tenant.database_path)) {
+                fs.unlinkSync(tenant.database_path);
+                console.log(`[Delete Tenant] Deleted database file: ${tenant.database_path}`);
+            }
+            
+            // Delete tenant from superadmin database
+            await superadminDb.run('DELETE FROM tenants WHERE id = ?', tenantId);
+            
+            // Delete related activity logs
+            await superadminDb.run('DELETE FROM tenant_activity_logs WHERE tenant_id = ?', tenantId);
+            
+            console.log(`[Delete Tenant] Successfully deleted tenant: ${tenant.slug} (${tenant.name})`);
+            
+            res.json({ success: true, message: `Tenant "${tenant.name}" deleted successfully` });
+        } catch (err) {
+            console.error('[Delete Tenant Error]', err);
+            res.status(500).json({ error: 'Failed to delete tenant' });
+        }
+    });
+
     // --- API ROUTES ---
     
     // Authentication

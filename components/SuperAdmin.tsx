@@ -359,6 +359,45 @@ const TenantApprovalManager: React.FC = () => {
         }
     };
 
+    const handleDelete = async (tenantId: string, tenantName: string, tenantSlug: string) => {
+        const confirmInput = prompt(
+            `⚠️ DELETE TENANT: "${tenantName}"\n\n` +
+            `This will PERMANENTLY delete:\n` +
+            `- All tenant data\n` +
+            `- Tenant database\n` +
+            `- All users, customers, sales, etc.\n\n` +
+            `Type "${tenantSlug}" to confirm deletion:`
+        );
+        
+        if (confirmInput !== tenantSlug) {
+            if (confirmInput !== null) {
+                setError('Deletion cancelled - confirmation slug did not match');
+            }
+            return;
+        }
+        
+        setActionLoading(tenantId);
+        try {
+            const res = await fetch(`/api/superadmin/tenants/${tenantId}`, {
+                method: 'DELETE',
+                headers: { ...getAuthHeader(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ confirmDelete: tenantSlug })
+            });
+            
+            if (!res.ok) {
+                const error = await res.json();
+                throw new Error(error.error || 'Failed to delete tenant');
+            }
+            
+            // Refresh list
+            await fetchTenants();
+        } catch (err) {
+            setError((err as Error).message);
+        } finally {
+            setActionLoading(null);
+        }
+    };
+
     const formatDate = (dateStr: string) => {
         if (!dateStr) return '-';
         return new Date(dateStr).toLocaleString();
@@ -455,28 +494,34 @@ const TenantApprovalManager: React.FC = () => {
                                             {formatDate(tenant.created_at)}
                                         </td>
                                         <td className="px-6 py-4 text-right">
-                                            {tenant.approval_status === 'pending' ? (
-                                                <div className="flex items-center justify-end gap-2">
-                                                    <button
-                                                        onClick={() => handleApprove(tenant.id, tenant.name)}
-                                                        disabled={actionLoading === tenant.id}
-                                                        className="px-4 py-2 gradient-primary text-white text-sm font-medium rounded-xl shadow-glass hover:shadow-glass-lg transition-all hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
-                                                    >
-                                                        {actionLoading === tenant.id ? <Loader size="sm" /> : 'Approve'}
-                                                    </button>
-                                                    <button
-                                                        onClick={() => handleReject(tenant.id, tenant.name)}
-                                                        disabled={actionLoading === tenant.id}
-                                                        className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-medium rounded-xl shadow-glass transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                                                    >
-                                                        Reject
-                                                    </button>
-                                                </div>
-                                            ) : (
-                                                <span className="text-xs text-slate-500 dark:text-slate-400">
-                                                    {tenant.approval_status === 'approved' ? '✓ Approved' : '✗ Rejected'}
-                                                </span>
-                                            )}
+                                            <div className="flex items-center justify-end gap-2">
+                                                {tenant.approval_status === 'pending' && (
+                                                    <>
+                                                        <button
+                                                            onClick={() => handleApprove(tenant.id, tenant.name)}
+                                                            disabled={actionLoading === tenant.id}
+                                                            className="px-4 py-2 gradient-primary text-white text-sm font-medium rounded-xl shadow-glass hover:shadow-glass-lg transition-all hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                        >
+                                                            {actionLoading === tenant.id ? <Loader size="sm" /> : 'Approve'}
+                                                        </button>
+                                                        <button
+                                                            onClick={() => handleReject(tenant.id, tenant.name)}
+                                                            disabled={actionLoading === tenant.id}
+                                                            className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-medium rounded-xl shadow-glass transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                                        >
+                                                            Reject
+                                                        </button>
+                                                    </>
+                                                )}
+                                                <button
+                                                    onClick={() => handleDelete(tenant.id, tenant.name, tenant.slug)}
+                                                    disabled={actionLoading === tenant.id}
+                                                    className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-xl shadow-glass transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    title="Delete tenant permanently"
+                                                >
+                                                    Delete
+                                                </button>
+                                            </div>
                                         </td>
                                     </tr>
                                 ))}
