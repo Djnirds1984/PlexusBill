@@ -1,4 +1,4 @@
--- Create table for Mikrotik Billing Manager Licenses
+-- Create table for PlexusBill Licenses
 -- This table stores license keys, their status, and the hardware ID they are bound to.
 
 CREATE TABLE IF NOT EXISTS public.licenses (
@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS public.licenses (
 );
 
 -- Add comments for clarity
-COMMENT ON TABLE public.licenses IS 'Licenses for Mikrotik Billing Manager software';
+COMMENT ON TABLE public.licenses IS 'Licenses for PlexusBill software';
 COMMENT ON COLUMN public.licenses.license_key IS 'Unique license key string';
 COMMENT ON COLUMN public.licenses.hardware_id IS 'Hardware ID of the machine where the license is activated';
 COMMENT ON COLUMN public.licenses.is_active IS 'Whether the license is currently valid/active';

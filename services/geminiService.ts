@@ -43,7 +43,7 @@ RULES:
 4. Provide the *entire*, complete, corrected code for the file. Do not use placeholders or omit sections. The user will replace their entire file with your output.
 5. Your final output MUST be a JSON object matching the provided schema. Do not add any conversational text or markdown formatting outside of the JSON object.`;
 
-const HELP_SYSTEM_INSTRUCTION = `You are a helpful and friendly AI assistant for the 'Mikrotik Billling Management by AJC' web panel.
+const HELP_SYSTEM_INSTRUCTION = `You are a helpful and friendly AI assistant for the 'PlexusBill' web panel.
 Your goal is to help users understand and troubleshoot issues with the panel and their MikroTik router.
 You will be given the user's conversation history and their current question, along with context about which page they are on and which router they have selected.
 

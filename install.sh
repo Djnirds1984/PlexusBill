@@ -1,10 +1,10 @@
 #!/bin/bash
-# Mikrotik Billing Manager Deployment Script
+# PlexusBill Deployment Script
 
 set -e # Exit on error
 
 echo "=================================================="
-echo "   Mikrotik Billing Manager - Installation"
+echo "   PlexusBill - Installation"
 echo "=================================================="
 
 # 1. Install System Dependencies
@@ -34,7 +34,7 @@ else
 fi
 
 # 2. Setup Directory Permissions
-TARGET_DIR="/var/www/html/Mikrotik-Billing-Manager"
+TARGET_DIR="/var/www/html/PlexusBill"
 CURRENT_USER=$(whoami)
 echo "[2/5] Setting up permissions for $TARGET_DIR..."
 if [ -d "$TARGET_DIR" ]; then

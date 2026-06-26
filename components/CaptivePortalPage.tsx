@@ -240,7 +240,7 @@ export const CaptivePortalPage: React.FC = () => {
                 </div>
             </div>
              <footer className="mt-8 text-center text-sm text-slate-500 dark:text-slate-400">
-                <p>Powered by {companySettings.companyName || 'Mikrotik Billling Management by AJC'}</p>
+                <p>Powered by {companySettings.companyName || 'PlexusBill'}</p>
             </footer>
 
             <CaptiveHelp />

@@ -46,7 +46,7 @@ echo ""
 # Step 2: Update the backend server code
 echo "[2/4] Pulling latest code from Git..."
 
-cd /home/$USER/Mikrotik-Billing-Manager || {
+cd /home/$USER/PlexusBill || {
     echo "      ERROR: Project directory not found!"
     echo "      Please navigate to your project directory manually and run: git pull"
     exit 1

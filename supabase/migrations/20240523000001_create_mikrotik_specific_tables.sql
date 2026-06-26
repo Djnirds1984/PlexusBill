@@ -1,4 +1,4 @@
--- Create table specifically for Mikrotik Billing Manager Licenses
+-- Create table specifically for PlexusBill Licenses
 CREATE TABLE IF NOT EXISTS public.mikrotik_licenses (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
     license_key text NOT NULL UNIQUE,
@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS public.mikrotik_licenses (
 );
 
 -- Add comments
-COMMENT ON TABLE public.mikrotik_licenses IS 'Licenses specifically for the Mikrotik Billing Manager software';
+COMMENT ON TABLE public.mikrotik_licenses IS 'Licenses specifically for the PlexusBill software';
 
 -- Create table for Mikrotik Routers (synced from local)
 CREATE TABLE IF NOT EXISTS public.mikrotik_routers (
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS public.mikrotik_sales_logs (
     created_at timestamptz DEFAULT now()
 );
 
-COMMENT ON TABLE public.mikrotik_sales_logs IS 'Synced sales logs from Mikrotik Billing Manager';
+COMMENT ON TABLE public.mikrotik_sales_logs IS 'Synced sales logs from PlexusBill';
 
 -- Enable RLS
 ALTER TABLE public.mikrotik_licenses ENABLE ROW LEVEL SECURITY;

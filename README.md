@@ -1,8 +1,8 @@
-# Mikrotik Billling Management by AJC
+# PlexusBill
 
 A modern, responsive web dashboard for managing your MikroTik routers, specifically designed to be lightweight enough to run on an Orange Pi or similar single-board computer. It features a real-time monitoring dashboard and a powerful AI Script Assistant powered by the Google Gemini API.
 
-![Screenshot of the Mikrotik Billling Management by AJC Dashboard](./screenshot.png)
+![Screenshot of the PlexusBill Dashboard](./screenshot.png)
 
 ## Features
 
@@ -110,8 +110,8 @@ This is the recommended way to run the panel in a production environment in your
 
 1.  **Clone the Repository:**
     ```bash
-    git clone https://github.com/Djnirds1984/Mikrotik-Billing-Manager.git
-    cd Mikrotik-Billing-Manager
+    git clone https://github.com/Djnirds1984/PlexusBill.git
+    cd PlexusBill
     ```
 
 2.  **Install Dependencies:**
@@ -163,7 +163,7 @@ You can update the panel directly from the "Updater" page in the UI. If you need
 
 1.  **Navigate to the project directory:**
     ```bash
-    cd /path/to/Mikrotik-Billing-Manager
+    cd /path/to/PlexusBill
     ```
 2.  **Pull the latest changes:**
     ```bash

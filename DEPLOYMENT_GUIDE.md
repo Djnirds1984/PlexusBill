@@ -1,6 +1,6 @@
-# Mikrotik Billling Management by AJC - Nginx Deployment Guide
+# PlexusBill - Nginx Deployment Guide
 
-This guide details how to set up the Mikrotik Billling Management by AJC in a standard production environment, serving it from the `/var/www/html` directory using Nginx as a reverse proxy. This allows you to access the panel on the standard web port 80.
+This guide details how to set up the PlexusBill in a standard production environment, serving it from the `/var/www/html` directory using Nginx as a reverse proxy. This allows you to access the panel on the standard web port 80.
 
 ## Prerequisites
 
@@ -76,23 +76,23 @@ sudo npm install -g pm2
     Clone the repository into the web root directory. You will need `sudo` because the directory is owned by root.
     ```bash
     cd /var/www/html
-    sudo git clone https://github.com/Djnirds1984/Mikrotik-Billing-Manager.git
+    sudo git clone https://github.com/Djnirds1984/PlexusBill.git
     ```
 
 2.  **Set Project Directory Permissions:**
     Change the ownership of the newly cloned project directory to your current user. This is **crucial** as it allows you to manage the application (install dependencies, run PM2) without needing `sudo` for every command.
     ```bash
     # Replace $USER with your actual username if it's not detected correctly
-    sudo chown -R root:root /var/www/html/Mikrotik-Billing-Manager
+    sudo chown -R root:root /var/www/html/PlexusBill
     ```
 
 3.  **Navigate into Project Directory:**
     ```bash
-    cd Mikrotik-Billing-Manager
+    cd PlexusBill
     ```
 
 Install Dependencies and Build:
-Run these commands from the project's root directory (/var/www/html/Mikrotik-Billing-Manager).
+Run these commands from the project's root directory (/var/www/html/PlexusBill).
 
 # 1. Install dependencies for UI Server (proxy)
 npm install --prefix proxy
@@ -220,7 +220,7 @@ Nginx will listen on the public port 80 and forward traffic to the correct Node.
     ```bash
     pm2 restart all
     ```
-5. cd /var/www/html/Mikrotik-Billing-Manager
+5. cd /var/www/html/PlexusBill
 
 6. # Ensure any old versions are stopped
    pm2 delete all
@@ -252,7 +252,7 @@ If you want to accept online payments through PayMongo, follow these steps:
 
 ### 5.2: Configure PayMongo in the Application
 
-1. **Access System Settings**: Log in to your Mikrotik Billing Manager as admin
+1. **Access System Settings**: Log in to your PlexusBill as admin
 2. **Navigate to Settings**: Go to **System Settings** > **PayMongo** tab
 3. **Enter PayMongo Credentials**:
    - **Public Key**: Paste your publishable key (e.g., `pk_test_xxxxx`)

@@ -1,6 +1,6 @@
 # 🎉 NEW FEATURE: Facebook Messenger Bot Integration
 
-## Included in Your MikroTik Billing Manager System
+## Included in Your PlexusBill System
 
 ---
 

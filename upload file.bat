@@ -2,10 +2,10 @@
 setlocal
 
 :: Configuration
-set DEST_DIR=/var/www/html/Mikrotik-Billing-Manager
+set DEST_DIR=/var/www/html/PlexusBill
 
 echo ==================================================
-echo    Mikrotik Billing Manager - Upload & Deploy
+echo    PlexusBill - Upload & Deploy
 echo ==================================================
 echo.
 

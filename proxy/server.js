@@ -8572,7 +8572,7 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
                 send({ log: `Querying latest commit on origin/${branch}...` });
                 const headers = {
                     'Accept': 'application/vnd.github+json',
-                    'User-Agent': 'Mikrotik-Billing-Manager-Updater',
+                    'User-Agent': 'PlexusBill-Updater',
                 };
                 if (process.env.GITHUB_TOKEN) headers['Authorization'] = `Bearer ${process.env.GITHUB_TOKEN}`;
                 const remote = await axios.get(`https://api.github.com/repos/${owner}/${repo}/commits/${branch}`, { headers, timeout: 15000 });
@@ -8620,7 +8620,7 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
     const githubApi = async (endpoint) => {
         const headers = {
             'Accept': 'application/vnd.github+json',
-            'User-Agent': 'Mikrotik-Billing-Manager-Updater',
+            'User-Agent': 'PlexusBill-Updater',
             'X-GitHub-Api-Version': '2022-11-28',
         };
         if (process.env.GITHUB_TOKEN) {

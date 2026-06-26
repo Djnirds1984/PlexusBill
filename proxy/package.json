@@ -1,7 +1,7 @@
 {
-  "name": "mikrotik-proxy-frontend",
+  "name": "plexusbill-proxy-frontend",
   "version": "1.6.0",
-  "description": "Frontend server for the Mikrotik Billling Management by AJC",
+  "description": "Frontend server for the PlexusBill",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
