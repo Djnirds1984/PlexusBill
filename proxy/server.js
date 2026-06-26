@@ -9894,14 +9894,29 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
                 if (e.stderr.includes('sudo')) throw { code: 'SUDO_PASSWORD_REQUIRED' };
                 throw e;
             });
+            
+            const info = JSON.parse(infoRaw);
+            console.log('[ZeroTier] Service info:', JSON.stringify(info));
+            
+            // Check if ZeroTier service is actually running
+            if (!info.address || info.address === '0000000000') {
+                console.error('[ZeroTier] Service is not running - address is all zeros');
+                throw { code: 'ZEROTIER_SERVICE_DOWN', message: 'ZeroTier service is not responding' };
+            }
+            
             const networksRaw = await runCommand('sudo zerotier-cli listnetworks -j');
             
             console.log('[ZeroTier] Raw networks data:', networksRaw);
+            console.log('[ZeroTier] Networks data length:', networksRaw ? networksRaw.length : 0);
 
-            const info = JSON.parse(infoRaw);
-            const networks = networksRaw && networksRaw.trim() ? JSON.parse(networksRaw) : [];
+            const networks = networksRaw && networksRaw.trim() && networksRaw.trim() !== '[]' ? JSON.parse(networksRaw) : [];
             
             console.log('[ZeroTier] Parsed networks:', networks.length);
+            if (networks.length > 0) {
+                networks.forEach((net, i) => {
+                    console.log(`[ZeroTier] Network ${i}:`, net.nwid, 'Status:', net.status, 'Name:', net.name);
+                });
+            }
 
             res.json({ info, networks });
         } catch (error) {
@@ -9910,6 +9925,8 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
                 res.json({ info: { online: false, version: '0.0.0', address: 'not_installed' }, networks: [], error: 'NOT_INSTALLED' });
             } else if (error.code === 'SUDO_PASSWORD_REQUIRED') {
                  res.status(500).json({ code: 'SUDO_PASSWORD_REQUIRED', message: 'Sudo access required' });
+            } else if (error.code === 'ZEROTIER_SERVICE_DOWN') {
+                 res.json({ info: { online: false, version: '0.0.0', address: 'error' }, networks: [], error: 'SERVICE_DOWN' });
             } else {
                  console.error("ZeroTier Error:", error);
                  res.json({ info: { online: false, version: '0.0.0', address: 'error' }, networks: [], error: error.message || 'Unknown error' });
