@@ -1,0 +1,1002 @@
+
+import React from 'react';
+
+export type View =
+  | 'dashboard'
+  | 'scripting'
+  | 'routers'
+  | 'network'
+  | 'terminal'
+  | 'pppoe'
+  | 'facebook-clients'
+  | 'users'
+  | 'billing'
+  | 'sales'
+  | 'inventory'
+  | 'accounting'
+  | 'payroll'
+  | 'hotspot'
+  | 'remote'
+  | 'company'
+  | 'system'
+  | 'updater'
+  | 'logs'
+  | 'panel_roles'
+  | 'help'
+  | 'mikrotik_files'
+  | 'license'
+  | 'super_admin'
+  | 'dhcp-portal'
+  | 'client_portal_users'
+  | 'repair_tickets'
+  | 'notifications'
+  | 'captive_chat'
+  | 'application_form'
+  | 'manual_payments'
+  | 'ntc-compliance'
+  | 'store_settings'
+  | 'soa';
+
+export interface Notification {
+  id: string;
+  type: 'pppoe-expired' | 'client-chat' | 'info';
+  message: string;
+  is_read: 0 | 1;
+  timestamp: string; // ISO string
+  link_to?: View;
+  context_json?: string; // JSON string for context data
+}
+
+export interface LicenseStatus {
+  licensed: boolean;
+  expires?: string;
+  deviceId?: string;
+  licenseKey?: string;
+  error?: string;
+  message?: string;
+  plan?: string;
+  maxRouters?: number;
+}
+
+export interface RouterConfig {
+  name: string;
+  host: string;
+  user: string;
+  password?: string;
+  port: number;
+  api_type?: 'rest' | 'legacy';
+}
+
+export interface RouterConfigWithId extends RouterConfig {
+  id: string;
+}
+
+export interface SystemInfo {
+  boardName: string;
+  version: string;
+  cpuLoad: number;
+  uptime: string;
+  memoryUsage: number;
+  totalMemory: string;
+  temperature?: number;
+}
+
+export interface Interface {
+  id: string;
+  name: string;
+  type: string;
+  rxRate: number;
+  txRate: number;
+  'rx-byte'?: number;
+  'tx-byte'?: number;
+  disabled?: boolean | string;
+}
+
+export interface TrafficHistoryPoint {
+  name: string;
+  rx: number;
+  tx: number;
+}
+
+export interface InterfaceWithHistory extends Interface {
+  trafficHistory: TrafficHistoryPoint[];
+}
+
+export interface HotspotActiveUser {
+  id: string;
+  user: string;
+  address: string;
+  macAddress: string;
+  uptime: string;
+  bytesIn: number;
+  bytesOut: number;
+  comment: string;
+}
+
+export interface HotspotHost {
+    id: string;
+    macAddress: string;
+    address: string;
+    toAddress: string;
+    authorized: boolean;
+    bypassed: boolean;
+    comment?: string;
+}
+
+export interface HotspotProfile {
+    id: string;
+    name: string;
+    'hotspot-address'?: string;
+    'dns-name'?: string;
+    'html-directory'?: string;
+    'rate-limit'?: string;
+    'login-by'?: string;
+}
+
+export type HotspotProfileData = Omit<HotspotProfile, 'id'>;
+
+export interface HotspotUserProfile {
+    id: string;
+    name: string;
+    'rate-limit'?: string;
+    'session-timeout'?: string;
+    'shared-users'?: string;
+    'address-pool'?: string;
+}
+
+export type HotspotUserProfileData = Omit<HotspotUserProfile, 'id'>;
+
+
+export interface PppProfile {
+    id: string;
+    name: string;
+    'local-address'?: string;
+    'remote-address'?: string;
+    'rate-limit'?: string;
+}
+
+export type PppProfileData = Omit<PppProfile, 'id'>;
+
+export interface PppServer {
+    id: string;
+    name: string;
+    'service-name': string;
+    interface: string;
+    'default-profile': string;
+    authentication: string; // "pap,chap,mschap1,mschap2"
+    disabled: string; // 'true' or 'false'
+}
+
+export type PppServerData = {
+    'service-name': string;
+    interface: string;
+    'default-profile': string;
+    authentication: ('pap' | 'chap' | 'mschap1' | 'mschap2')[];
+    disabled?: 'true' | 'false';
+};
+
+export interface IpPool {
+    id: string;
+    name: string;
+    ranges: string;
+}
+
+export interface IpAddress {
+    id: string;
+    address: string;
+    interface: string;
+    disabled: string;
+}
+
+export interface IpRoute {
+    id: string;
+    'dst-address': string;
+    gateway?: string;
+    distance: string;
+    active: string;
+    disabled: string;
+    comment?: string;
+    static: string;
+    dynamic: string;
+    connected: string;
+}
+
+export type IpRouteData = {
+    'dst-address': string;
+    gateway?: string;
+    distance?: string;
+    comment?: string;
+    disabled?: 'true' | 'false';
+};
+
+
+export interface BillingPlan {
+    name: string;
+    price: number;
+    cycle: 'Monthly' | 'Quarterly' | 'Yearly';
+    cycle_days?: number;
+    pppoeProfile: string;
+    description: string;
+    currency: string;
+    routerId?: string;
+    store_enabled?: number;
+}
+
+export interface BillingPlanWithId extends BillingPlan {
+  id: string;
+}
+
+export interface VoucherPlan {
+    routerId: string;
+    name: string;
+    duration_minutes: number;
+    price: number;
+    currency: string;
+    mikrotik_profile_name: string;
+}
+
+export interface VoucherPlanWithId extends VoucherPlan {
+    id: string;
+}
+
+export interface DhcpBillingPlan {
+    routerId: string;
+    name: string;
+    price: number;
+    cycle_days: number;
+    speedLimit?: string;
+    currency: string;
+    store_enabled?: number;
+}
+
+export interface DhcpBillingPlanWithId extends DhcpBillingPlan {
+    id: string;
+}
+
+
+export interface PppSecret {
+    id: string;
+    name: string;
+    service: string;
+    profile: string;
+    comment: string;
+    disabled: string;
+    'last-logged-out'?: string;
+    password?: string;
+    customer?: Customer; // Link to customer data
+}
+
+export type PppSecretData = Omit<PppSecret, 'id' | 'last-logged-out' | 'customer'>;
+
+export interface PppActiveConnection {
+    id: string;
+    name: string;
+    service: string;
+    'caller-id': string;
+    address: string;
+    uptime: string;
+    'limit-bytes-in'?: number;
+    'limit-bytes-out'?: number;
+    comment?: string;
+    interface?: string; // Often implied, but good to have
+}
+
+export interface NtpSettings {
+    enabled: boolean;
+    primaryNtp: string;
+    secondaryNtp: string;
+}
+
+export interface VlanInterface {
+    id: string;
+    name: string;
+    'vlan-id': string;
+    interface: string;
+}
+
+export interface Bridge {
+    id: string;
+    name: string;
+    mtu: string;
+    l2mtu: string;
+    arp: 'enabled' | 'disabled' | 'proxy-arp' | 'reply-only';
+    'mac-address': string;
+    'protocol-mode': 'none' | 'rstp' | 'stp' | 'mstp';
+    'fast-forward': 'true' | 'false';
+    'vlan-filtering': 'true' | 'false';
+    disabled: 'true' | 'false';
+}
+
+export type BridgeData = Partial<Omit<Bridge, 'id' | 'l2mtu' | 'mac-address'>>;
+
+export interface BridgePort {
+    id: string;
+    interface: string;
+    bridge: string;
+    pvid: string;
+    hw: 'true' | 'false';
+    disabled: 'true' | 'false';
+    comment?: string;
+}
+
+export type BridgePortData = Partial<Omit<BridgePort, 'id' | 'hw'>>;
+
+export interface SaleRecord {
+    id: string;
+    date: string;
+    clientName: string; // This will be the customer's full name
+    planName: string;
+    planPrice: number;
+    discountAmount: number;
+    finalAmount: number;
+    routerName: string;
+    currency: string;
+    routerId?: string;
+    clientAddress?: string;
+    clientContact?: string;
+    clientEmail?: string;
+    planType?: 'prepaid' | 'postpaid';
+    coveredMonth?: string;
+    processedBy?: string; // Username of employee/admin who processed the payment
+}
+
+export interface InventoryItem {
+    id: string;
+    name: string;
+    quantity: number;
+    price?: number;
+    serialNumber?: string;
+    dateAdded: string;
+}
+
+export interface ExpenseRecord {
+    id: string;
+    date: string;
+    category: string;
+    description: string;
+    amount: number;
+    routerId?: string; // Optional: associate expense with specific router
+}
+
+export interface PisowifiIncomeRecord {
+    id: string;
+    resellerId?: string;
+    resellerName: string;
+    vendoLocation: string;
+    percentage: number;
+    grossSales: number;
+    expenses: number;
+    netTotal: number;
+    createdAt: string;
+}
+
+export interface PisowifiReseller {
+    id: string;
+    name: string;
+    contactNumber?: string;
+    notes?: string;
+    createdAt: string;
+}
+
+
+export interface CompanySettings {
+    companyName?: string;
+    address?: string;
+    contactNumber?: string;
+    email?: string;
+    logoBase64?: string;
+    gcashNumber?: string;
+    gcashAccountName?: string;
+}
+
+export interface Application {
+    id: string;
+    name: string;
+    email: string;
+    phone: string;
+    message: string;
+    planName: string;
+    pdfPath: string;
+    createdAt: string;
+}
+
+export interface ChatMessage {
+  role: 'user' | 'model';
+  content: string;
+}
+
+export interface AIFixResponse {
+  explanation: string;
+  fixedCode: string;
+}
+
+export interface ZeroTierInfo {
+    address: string;
+    clock: number;
+    config: {
+        settings: {
+            portMappingEnabled: boolean;
+            primaryPort: number;
+        }
+    };
+    online: boolean;
+    version: string;
+}
+
+export interface ZeroTierNetwork {
+    allowDefault: boolean;
+    allowGlobal: boolean;
+    allowManaged: boolean;
+    assignedAddresses: string[];
+    bridge: boolean;
+    mac: string;
+    mtu: number;
+    name: string;
+    netconfRevision: number;
+    nwid: string;
+    portDeviceName: string;
+    portError: number;
+    status: string;
+    type: string;
+}
+
+export interface ZeroTierStatusResponse {
+    info: ZeroTierInfo;
+    networks: ZeroTierNetwork[];
+}
+
+export interface PanelHostStatus {
+  cpuUsage: number;
+  memory: {
+    total: string;
+    used: string;
+    free: string;
+    percent: number;
+  };
+  disk: {
+    total: string;
+    used: string;
+    free: string;
+    percent: number;
+  };
+  uptime: string;
+  temperature?: number;
+  wanIp?: string;
+  localIps?: { iface: string; ip: string }[];
+}
+
+export interface TelegramSettings {
+    enabled: boolean;
+    botToken: string;
+    chatId: string;
+    enableClientDueDate: boolean;
+    enableClientDisconnected: boolean;
+    enableInterfaceDisconnected: boolean;
+    enableUserPaid: boolean;
+}
+
+export interface PayMongoSettings {
+    enabled: boolean;
+    publicKey: string;
+    secretKey: string;
+    webhookSecret: string;
+    webhookUrl?: string;
+    passFeesToCustomer?: boolean;
+    paymentMethods?: string[];  // Array of payment method IDs: ['qrph', 'gcash', 'card', etc.]
+}
+
+export interface XenditSettings {
+    enabled: boolean;
+    publicKey: string;
+    secretKey: string;
+    webhookToken: string;
+    webhookUrl?: string;
+    passFeesToCustomer?: boolean;
+    paymentMethods?: string[];
+}
+
+export interface FacebookMessengerSettings {
+    enabled: boolean;
+    pageId: string;
+    pageAccessToken: string;
+    verifyToken: string;
+    routerId?: string; // Which router this Facebook page is associated with
+}
+
+export interface LandingPagePage {
+    id: string;
+    label: string;
+}
+
+export interface LandingPagePlan {
+    name: string;
+    speedText?: string;
+    priceText: string;
+    ctaLabel?: string;
+}
+
+export interface LandingPageFeature {
+    title: string;
+    description: string;
+}
+
+export interface LandingPageProductCard {
+    title: string;
+    subtitle?: string;
+    priceText?: string;
+}
+
+export interface LandingPageLink {
+    label: string;
+    href: string;
+}
+
+export interface LandingPageConfig {
+    webTitle?: string;
+    heroBadge?: string;
+    heroTitle?: string;
+    heroSubtitle?: string;
+    heroCtaLabel?: string;
+    heroLoginPrompt?: string;
+    heroLoginLabel?: string;
+    navAdminLabel?: string;
+    navClientPortalLabel?: string;
+    templateId?: string;
+    templateName?: string;
+    theme?: {
+        primary500?: string;
+        primary600?: string;
+        primary700?: string;
+        accent?: string;
+        background?: string;
+    };
+    adImageBase64?: string;
+    adImageAlt?: string;
+    adImageLink?: string;
+    pages?: LandingPagePage[];
+    features?: LandingPageFeature[];
+    plans?: LandingPagePlan[];
+    plansTitle?: string;
+    productCards?: LandingPageProductCard[];
+    footerLinks?: LandingPageLink[];
+    contactTitle?: string;
+    contactEmail?: string;
+    contactPhone?: string;
+    contactAddress?: string;
+    contactFacebookUrl?: string;
+}
+
+export interface PanelSettings {
+    language: 'en' | 'fil' | 'es' | 'pt';
+    currency: 'USD' | 'PHP' | 'EUR' | 'BRL';
+    geminiApiKey?: string;
+    databaseEngine?: 'sqlite' | 'mariadb';
+    dbHost?: string;
+    dbPort?: number;
+    dbUser?: string;
+    dbPassword?: string;
+    dbName?: string;
+    notificationSettings?: {
+        debounceMinutes: number;
+        dhcpNearExpiryHours: number;
+    };
+    telegramSettings?: TelegramSettings;
+    paymongoSettings?: PayMongoSettings;
+    xenditSettings?: XenditSettings;
+    facebookSettings?: FacebookMessengerSettings;
+    landingPageConfig?: LandingPageConfig;
+}
+
+export interface StoreSettings {
+    portalRedirectUrl: string;
+    nonPaymentPool: string;
+    portalServerIp: string;
+    portalServerPort: number;
+    walledGardenEnabled: boolean;
+    autoSyncWorkerEnabled: boolean;
+    customExpiredMessage: string;
+    storeEnabled: boolean;
+    paymentMethods: { paymongo: boolean; manualGcash: boolean; xendit: boolean };
+    gcashNumber: string;
+    gcashAccountName: string;
+    storeBannerText: string;
+    autoRestoreOnPayment: boolean;
+    storeTheme: 'modern' | 'dark-premium' | 'colorful' | 'minimal';
+}
+
+export interface BillingSettings {
+    nonPaymentProfile: string;
+    defaultPlanId: string;
+    gracePeriodDays: number;
+    expiryTime: string; // HH:MM format
+}
+
+export interface PanelNtpStatus {
+    enabled: boolean;
+}
+
+export interface Customer {
+    id: string;
+    username: string; // pppoe username
+    routerId: string; // router this customer belongs to
+    fullName?: string;
+    address?: string;
+    contactNumber?: string;
+    email?: string;
+    accountNumber?: string;
+    gps?: string;
+    applicationId?: string;
+    dueDate?: string;
+    planName?: string;
+    planType?: string;
+    password?: string;
+}
+
+export interface WanRoute {
+    id: string;
+    gateway: string;
+    distance: string;
+    checkGateway: string;
+    active: string;
+    disabled: string;
+    comment?: string;
+}
+
+export interface FailoverStatus {
+    enabled: boolean;
+}
+
+export interface Employee {
+  id: string;
+  fullName: string;
+  role: string;
+  hireDate: string; // ISO string YYYY-MM-DD
+  salaryType: 'daily' | 'monthly';
+  rate: number;
+}
+
+export interface EmployeeBenefit {
+    id: string;
+    employeeId: string;
+    sss: boolean;
+    philhealth: boolean;
+    pagibig: boolean;
+}
+
+export interface TimeRecord {
+    id: string;
+    employeeId: string;
+    date: string; // YYYY-MM-DD
+    timeIn: string; // HH:MM
+    timeOut: string; // HH:MM
+}
+
+
+export interface FirewallRuleBase {
+    '.id': string;
+    id: string;
+    chain: string;
+    action: string;
+    comment?: string;
+    disabled: string;
+    invalid: string;
+    dynamic: string;
+    bytes: number;
+    packets: number;
+}
+
+export interface FirewallFilterRule extends FirewallRuleBase {
+    'src-address'?: string;
+    'dst-address'?: string;
+    protocol?: string;
+    'src-port'?: string;
+    'dst-port'?: string;
+    'in-interface'?: string;
+    'out-interface'?: string;
+    'connection-state'?: string;
+}
+
+export interface FirewallNatRule extends FirewallRuleBase {
+    'src-address'?: string;
+    'dst-address'?: string;
+    protocol?: string;
+    'src-port'?: string;
+    'dst-port'?: string;
+    'in-interface'?: string;
+    'out-interface'?: string;
+    'to-addresses'?: string;
+    'to-ports'?: string;
+}
+
+export interface FirewallMangleRule extends FirewallRuleBase {
+    'src-address'?: string;
+    'dst-address'?: string;
+    'new-routing-mark'?: string;
+    passthrough: string;
+    protocol?: string;
+}
+
+export type FirewallRule = FirewallFilterRule | FirewallNatRule | FirewallMangleRule;
+
+export type FirewallFilterRuleData = Partial<Omit<FirewallFilterRule, 'id' | '.id' | 'invalid' | 'dynamic' | 'bytes' | 'packets'>>;
+export type FirewallNatRuleData = Partial<Omit<FirewallNatRule, 'id' | '.id' | 'invalid' | 'dynamic' | 'bytes' | 'packets'>>;
+export type FirewallMangleRuleData = Partial<Omit<FirewallMangleRule, 'id' | '.id' | 'invalid' | 'dynamic' | 'bytes' | 'packets'>>;
+export type FirewallRuleData = FirewallFilterRuleData | FirewallNatRuleData | FirewallMangleRuleData;
+
+export interface SimpleQueue {
+    id: string;
+    name: string;
+    target: string;
+    'max-limit'?: string;
+    bytes: string;
+    packets: string;
+    disabled: 'true' | 'false';
+    comment?: string;
+}
+
+export type SimpleQueueData = Partial<Omit<SimpleQueue, 'id' | 'bytes' | 'packets'>>;
+
+export interface SslCertificate {
+    id: string;
+    name: string;
+    'key-usage': string;
+    trusted: string;
+    'expires-after': string;
+}
+
+export interface HotspotSetupParams {
+    hotspotInterface: string;
+    localAddress: string;
+    addressPool: string;
+    sslCertificate: string; 
+    dnsServers: string;
+    dnsName: string;
+    hotspotUser: string;
+    hotspotPass: string;
+}
+
+export interface VersionInfo {
+    title: string;
+    description: string;
+    hash?: string;
+    remoteUrl?: string;
+}
+
+export interface NewVersionInfo {
+    title: string;
+    description: string;
+    changelog: string;
+}
+
+export interface GitHubRepository {
+    owner: string;
+    repo: string;
+    url: string;
+    isValid: boolean;
+}
+
+export interface GitHubBranch {
+    name: string;
+    protected: boolean;
+    sha: string;
+}
+
+export interface GitHubPullResult {
+    success: boolean;
+    message: string;
+    changes?: {
+        filesChanged: number;
+        insertions: number;
+        deletions: number;
+    };
+    error?: string;
+}
+export interface DataplicityStatus {
+    installed: boolean;
+    url?: string;
+}
+
+export interface PiTunnelStatus {
+    installed: boolean;
+    active: boolean;
+    url?: string;
+}
+
+export interface CloudflareTunnelStatus {
+    installed: boolean;
+    active: boolean;
+    url?: string;
+}
+
+export interface HostInterface {
+    name: string;
+    ip4: string;
+    mac: string;
+}
+
+export interface HostNetworkConfig {
+    ipForwarding: boolean;
+    interfaces: HostInterface[];
+    wanInterface: string | null;
+    lanInterface: string | null;
+    lanIp: string | null;
+    natActive: boolean;
+    dnsmasqActive: boolean;
+}
+
+export interface MikroTikLogEntry {
+    id: string;
+    time: string;
+    topics: string | string[];
+    message: string;
+}
+
+export interface NgrokStatus {
+    installed: boolean;
+    active: boolean;
+    url?: string;
+    config?: {
+        authtoken: string;
+        proto: string;
+        port: number;
+    };
+}
+
+export interface MikroTikFile {
+    id: string;
+    name: string;
+    type: string;
+    size: string;
+}
+
+export interface DhcpServer {
+    id: string;
+    name: string;
+    interface: string;
+    'address-pool': string;
+    'lease-time': string;
+    disabled: 'true' | 'false';
+    invalid: 'true' | 'false';
+    'lease-script'?: string;
+}
+
+export type DhcpServerData = Partial<Omit<DhcpServer, 'id' | 'invalid'>>;
+
+export interface DhcpLease {
+    id: string;
+    address: string;
+    'mac-address': string;
+    'client-id'?: string;
+    server: string;
+    status: string; // e.g., 'waiting', 'bound'
+    dynamic: 'true' | 'false';
+    comment?: string;
+    'host-name'?: string;
+}
+
+export interface DhcpServerSetupParams {
+    dhcpInterface: string;
+    dhcpAddressSpace: string;
+    gateway: string;
+    addressPool: string;
+    dnsServers: string;
+    leaseTime: string;
+}
+
+export interface DhcpCaptivePortalSetupParams {
+    panelIp: string;
+    lanInterface: string;
+}
+
+export interface DhcpClient {
+    id: string; 
+    status: 'pending' | 'active';
+    address: string;
+    macAddress: string;
+    hostName: string;
+    server?: string;
+    customerInfo?: string;
+    contactNumber?: string;
+    email?: string;
+    speedLimit?: string;
+    timeout?: string; 
+    creationTime?: string;
+    comment?: string;
+}
+
+export interface DhcpClientDbRecord {
+    id: string;
+    routerId: string;
+    macAddress: string;
+    customerInfo?: string;
+    contactNumber?: string;
+    email?: string;
+    speedLimit?: string;
+    lastSeen: string;
+    accountNumber?: string;
+    applicationId?: string;
+}
+
+
+export interface DhcpClientActionParams {
+    customerInfo: string;
+    contactNumber?: string;
+    email?: string;
+    plan?: DhcpBillingPlanWithId;
+    downtimeDays?: number;
+    planType?: 'prepaid' | 'postpaid';
+    graceDays?: number;
+    graceTime?: string;
+    expiresAt?: string;
+    speedLimit?: string;
+    accountNumber?: string;
+    gpsCoordinates?: string;
+}
+
+export interface NetworkStatus {
+  wanInterface: string;
+  ipAddress: string;
+  gateway: string;
+  dnsServers: string[];
+  isOnline: boolean;
+  uptime?: string;
+}
+
+export interface WanSettings {
+  id?: number;
+  connectionType: 'dhcp' | 'static' | 'pppoe';
+  wanInterface: string;
+  staticIp?: string;
+  staticGateway?: string;
+  staticDns?: string;
+  pppoeUsername?: string;
+  pppoePassword?: string;
+  pppoeInterfaceName?: string;
+  lastAppliedAt?: string;
+  status: 'pending' | 'applied' | 'failed';
+  errorMessage?: string;
+}
+
+export interface AvailableInterface {
+  name: string;
+  mac: string;
+  state: string;
+  mtu: number;
+}
+
+export interface AvailableInterfacesResponse {
+  interfaces: AvailableInterface[];
+  defaultInterface: string | null;
+}
+
+// Custom Invoice Types
+export type InvoiceType = 'subscription' | 'custom';
+export type CustomInvoiceCategory = 'CCTV Installation' | 'Computer Repair' | 'Network Setup' | 'Cabling' | 'Maintenance' | 'Other';
+
+export interface CustomInvoiceItem {
+  description: string;
+  category: CustomInvoiceCategory | string;
+  laborCost: number;
+  partsCost: number;
+}
+
+export interface ClientInvoice {
+  id: string;
+  routerId: string;
+  username: string;
+  accountNumber?: string;
+  source: 'pppoe' | 'dhcp';
+  planName?: string;
+  planId?: string;
+  amount: number;
+  currency: string;
+  dueDateTime?: string;
+  issueDate: string;
+  status: 'PENDING' | 'PAID' | 'EXPIRED' | 'CANCELED';
+  // Custom invoice fields
+  description?: string;
+  category?: string;
+  laborCost?: number;
+  partsCost?: number;
+  invoiceType?: InvoiceType;
+}

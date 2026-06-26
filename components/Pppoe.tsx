@@ -1,0 +1,2380 @@
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { TrafficChart } from './chart.tsx';
+import type { RouterConfigWithId, PppProfile, IpPool, PppProfileData, PppSecret, PppActiveConnection, SaleRecord, BillingPlanWithId, Customer, PppSecretData, PppServer, PppServerData, Interface, TrafficHistoryPoint } from '../types.ts';
+import { 
+    getPppProfiles, getIpPools, addPppProfile, updatePppProfile, deletePppProfile,
+    getPppSecrets, getPppActiveConnections, getPppActiveTraffic, addPppSecret, updatePppSecret, deletePppSecret, processPppPayment,
+    deletePppActiveConnection,
+    getPppServers, addPppServer, updatePppServer, deletePppServer, getInterfaces,
+    savePppUser // Import the new service function
+} from '../services/mikrotikService.ts';
+import { useBillingPlans } from '../hooks/useBillingPlans.ts';
+import { useBillingSettings } from '../hooks/useBillingSettings.ts';
+import { useCustomers } from '../hooks/useCustomers.ts';
+import { Loader } from './Loader.tsx';
+import { RouterIcon, EditIcon, TrashIcon, ExclamationTriangleIcon, UsersIcon, SignalIcon, CurrencyDollarIcon, KeyIcon, SearchIcon, EyeIcon, EyeSlashIcon, ServerIcon, XMarkIcon } from '../constants.tsx';
+import { PaymentModal } from './PaymentModal.tsx';
+import { GracePeriodModal } from './GracePeriodModal.tsx';
+import { useLocalization } from '../contexts/LocalizationContext.tsx';
+import { useCompanySettings } from '../hooks/useCompanySettings.ts';
+import { useAuth } from '../contexts/AuthContext.tsx';
+import { generateApplicationForm, deleteApplication } from '../services/applicationService.ts';
+import { dbApi } from '../services/databaseService.ts';
+
+// --- Reusable Components ---
+
+const HighlightText = ({ text, highlight }: { text: string; highlight: string }) => {
+    if (!highlight || !text) return <>{text}</>;
+    // Escape regex special characters
+    const escapedHighlight = highlight.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const parts = text.split(new RegExp(`(${escapedHighlight})`, 'gi'));
+    return (
+        <span>
+            {parts.map((part, i) => 
+                part.toLowerCase() === highlight.toLowerCase() ? (
+                    <span key={i} className="bg-yellow-200 dark:bg-yellow-900/50 rounded-sm px-0.5">{part}</span>
+                ) : (
+                    part
+                )
+            )}
+        </span>
+    );
+};
+
+const TabButton: React.FC<{ label: string, icon: React.ReactNode, isActive: boolean, onClick: () => void }> = ({ label, icon, isActive, onClick }) => (
+    <button
+        onClick={onClick}
+        className={`flex items-center px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors duration-200 focus:outline-none ${
+            isActive
+                ? 'border-[--color-primary-500] text-[--color-primary-500] dark:text-[--color-primary-400]'
+                : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+        }`}
+    >
+        {icon}
+        <span className="ml-2">{label}</span>
+    </button>
+);
+
+// --- Profile Form Modal (Refactored) ---
+const ProfileFormModal: React.FC<{
+    isOpen: boolean;
+    onClose: () => void;
+    onSave: (data: PppProfile | PppProfileData) => void;
+    initialData: PppProfile | null;
+    pools: IpPool[];
+    isSubmitting: boolean;
+}> = ({ isOpen, onClose, onSave, initialData, pools, isSubmitting }) => {
+    const [profile, setProfile] = useState<Partial<PppProfileData>>({});
+
+    useEffect(() => {
+        if (isOpen) {
+            if (initialData) {
+                setProfile({ 
+                    name: initialData.name, 
+                    'local-address': initialData['local-address'] || '', 
+                    'remote-address': initialData['remote-address'] || 'none', 
+                    'rate-limit': initialData['rate-limit'] || '' 
+                });
+            } else {
+                setProfile({ name: '', 'local-address': '', 'remote-address': 'none', 'rate-limit': '' });
+            }
+        }
+    }, [initialData, isOpen]);
+
+    if (!isOpen) return null;
+
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        onSave(initialData ? { ...profile, id: initialData.id } as PppProfile : profile as PppProfileData);
+    };
+
+    const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+        setProfile(p => ({ ...p, [e.target.name]: e.target.value }));
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+            <div className="bg-white dark:bg-slate-800 rounded-lg shadow-xl w-full max-w-lg">
+                <form onSubmit={handleSubmit}>
+                    <div className="p-6">
+                        <h3 className="text-xl font-bold mb-4">{initialData ? 'Edit Profile' : 'Add New Profile'}</h3>
+                        <div className="space-y-4">
+                            <div>
+                                <label>Profile Name</label>
+                                <input type="text" name="name" value={profile.name} onChange={handleChange} required disabled={!!initialData} className="mt-1 block w-full bg-slate-100 dark:bg-slate-700 rounded-md p-2 disabled:opacity-50" />
+                            </div>
+                            <div>
+                                <label>Local Address</label>
+                                <input type="text" name="local-address" value={profile['local-address']} onChange={handleChange} className="mt-1 block w-full bg-slate-100 dark:bg-slate-700 rounded-md p-2" />
+                            </div>
+                            <div>
+                                <label>Remote Address (Pool)</label>
+                                <select name="remote-address" value={profile['remote-address']} onChange={handleChange} className="mt-1 block w-full bg-slate-100 dark:bg-slate-700 rounded-md p-2">
+                                    <option value="none">none</option>
+                                    {pools.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label>Rate Limit (rx/tx)</label>
+                                <input type="text" placeholder="e.g., 10M/20M" name="rate-limit" value={profile['rate-limit']} onChange={handleChange} className="mt-1 block w-full bg-slate-100 dark:bg-slate-700 rounded-md p-2" />
+                            </div>
+                        </div>
+                    </div>
+                    <div className="bg-slate-50 dark:bg-slate-900/50 px-6 py-3 flex justify-end gap-3">
+                        <button type="button" onClick={onClose} disabled={isSubmitting}>Cancel</button>
+                        <button type="submit" disabled={isSubmitting} className="px-4 py-2 bg-[--color-primary-600] text-white rounded-md disabled:opacity-50">
+                            {isSubmitting ? 'Saving...' : 'Save'}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    );
+};
+
+// --- Profiles Management Sub-component ---
+const ProfilesManager: React.FC<{ selectedRouter: RouterConfigWithId }> = ({ selectedRouter }) => {
+    const [profiles, setProfiles] = useState<PppProfile[]>([]);
+    const [pools, setPools] = useState<IpPool[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [error, setError] = useState<{ profiles?: string; pools?: string } | null>(null);
+    const [isModalOpen, setIsModalOpen] = useState(false);
+    const [editingProfile, setEditingProfile] = useState<PppProfile | null>(null);
+
+    const fetchData = useCallback(async () => {
+        setIsLoading(true);
+        setError(null);
+        try {
+            const [profilesData, poolsData] = await Promise.all([
+                getPppProfiles(selectedRouter),
+                getIpPools(selectedRouter),
+            ]);
+            setProfiles(profilesData);
+            setPools(poolsData);
+        } catch (err) {
+            setError({ profiles: `Could not fetch data: ${(err as Error).message}` });
+        } finally {
+            setIsLoading(false);
+        }
+    }, [selectedRouter]);
+
+    useEffect(() => { fetchData(); }, [fetchData]);
+
+    const handleSave = async (profileData: PppProfile | PppProfileData) => {
+        setIsSubmitting(true);
+        try {
+            if ('id' in profileData) await updatePppProfile(selectedRouter, profileData);
+            else await addPppProfile(selectedRouter, profileData);
+            setIsModalOpen(false);
+            setEditingProfile(null);
+            await fetchData();
+        } catch (err) { alert(`Error saving profile: ${(err as Error).message}`); }
+        finally { setIsSubmitting(false); }
+    };
+
+    const handleDelete = async (profileId: string) => {
+        if (!window.confirm("Are you sure?")) return;
+        try {
+            await deletePppProfile(selectedRouter, profileId);
+            await fetchData();
+        } catch (err) { alert(`Error deleting profile: ${(err as Error).message}`); }
+    };
+    
+
+    if (isLoading) return <div className="flex justify-center p-8"><Loader /></div>;
+    if (error?.profiles) return <div className="p-4 text-red-600">{error.profiles}</div>;
+
+    return (
+        <div>
+            <ProfileFormModal 
+                isOpen={isModalOpen} 
+                onClose={() => { setIsModalOpen(false); setEditingProfile(null); }} 
+                onSave={handleSave} 
+                initialData={editingProfile} 
+                pools={pools}
+                isSubmitting={isSubmitting} 
+            />
+            <div className="flex justify-end mb-4">
+                <button onClick={() => { setEditingProfile(null); setIsModalOpen(true); }} className="bg-[--color-primary-600] text-white font-bold py-2 px-4 rounded-lg">Add New Profile</button>
+            </div>
+            <div className="bg-white dark:bg-slate-800 rounded-lg shadow-md overflow-hidden">
+                <table className="w-full text-sm">
+                    <thead className="text-xs uppercase bg-slate-50 dark:bg-slate-900/50"><tr><th className="px-6 py-3">Name</th><th className="px-6 py-3">Local Address</th><th className="px-6 py-3">Remote Pool</th><th className="px-6 py-3">Rate Limit</th><th className="px-6 py-3 text-right">Actions</th></tr></thead>
+                    <tbody>
+                        {profiles.map(p => (
+                            <tr key={p.id} className="border-b dark:border-slate-700">
+                                <td className="px-6 py-4 font-medium">{p.name}</td><td className="px-6 py-4">{p['local-address'] || 'n/a'}</td><td className="px-6 py-4">{p['remote-address'] || 'n/a'}</td><td className="px-6 py-4">{p['rate-limit'] || 'N/A'}</td>
+                                <td className="px-3 py-2 md:px-6 md:py-4 text-right"><div className="flex flex-wrap gap-2 justify-end"><button onClick={() => { setEditingProfile(p); setIsModalOpen(true); }} className="p-1"><EditIcon className="w-5 h-5"/></button><button onClick={() => handleDelete(p.id)} className="p-1"><TrashIcon className="w-5 h-5"/></button></div></td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+}
+
+// --- User Form Modal ---
+const UserFormModal: React.FC<any> = ({ isOpen, onClose, onSave, initialData, plans, customers, profiles, isSubmitting, selectedRouterId }) => {
+    const [secret, setSecret] = useState({ name: '', password: '', profile: '' }); // profile is plan ID
+    const [customer, setCustomer] = useState({ fullName: '', address: '', contactNumber: '', email: '', accountNumber: '', gps: '' });
+    const [showPass, setShowPass] = useState(false);
+    const [dueDate, setDueDate] = useState('');
+    const [planType, setPlanType] = useState<'prepaid' | 'postpaid'>('prepaid');
+    const [createPortalAccount, setCreatePortalAccount] = useState(false);
+    const [portalAccountExists, setPortalAccountExists] = useState(false);
+    const toDatetimeLocal = (s: string) => {
+        try {
+            const d = new Date(s);
+            const pad = (n: number) => String(n).padStart(2, '0');
+            const yyyy = d.getFullYear();
+            const mm = pad(d.getMonth() + 1);
+            const dd = pad(d.getDate());
+            const hh = pad(d.getHours());
+            const mi = pad(d.getMinutes());
+            return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+        } catch { return s; }
+    };
+
+
+    useEffect(() => {
+        if (!isOpen) {
+            return;
+        }
+
+        if (initialData) {
+            // DIRECT APPROACH: Always extract from MikroTik comment first (it's the source of truth)
+            let accountNumber = '';
+            let fullName = '';
+            let address = '';
+            let contactNumber = '';
+            let email = '';
+            let gps = '';
+            
+            if (initialData.comment) {
+                try {
+                    const commentData = JSON.parse(initialData.comment);
+                    // Extract account number - THIS IS THE MOST RELIABLE SOURCE
+                    accountNumber = commentData.accountNumber || commentData.customer?.accountNumber || '';
+                    
+                    // Extract customer info
+                    if (commentData.customer) {
+                        fullName = commentData.customer.fullName || '';
+                        address = commentData.customer.address || '';
+                        contactNumber = commentData.customer.contactNumber || '';
+                        email = commentData.customer.email || '';
+                        gps = commentData.customer.gps || '';
+                    }
+                    
+                    if (accountNumber) {
+                        console.log(`[UserFormModal] ✓ Using account number from MikroTik: ${accountNumber}`);
+                    }
+                } catch (e) {
+                    console.error('[UserFormModal] Failed to parse comment:', e);
+                }
+            }
+            
+            const linkedPlan = plans.find(p => p.pppoeProfile === initialData.profile);
+            
+            setSecret({ name: initialData.name, password: '', profile: linkedPlan?.id || '' });
+            setCustomer({ 
+                fullName: fullName,
+                address: address,
+                contactNumber: contactNumber,
+                email: email,
+                accountNumber: accountNumber, // This will ALWAYS have the value from MikroTik
+                gps: gps
+            });
+            
+            // Set due date and plan type from comment
+            try {
+                const commentData = JSON.parse(initialData.comment);
+                if (commentData.dueDateTime) {
+                    setDueDate(toDatetimeLocal(commentData.dueDateTime));
+                } else if (commentData.dueDate) {
+                    const dateTime = `${commentData.dueDate}T23:59`;
+                    setDueDate(dateTime);
+                } else {
+                    setDueDate('');
+                }
+                const pt = String(commentData.planType || '').toLowerCase().trim();
+                setPlanType(pt === 'postpaid' ? 'postpaid' : 'prepaid');
+            } catch (e) {
+                setDueDate('');
+                setPlanType('prepaid');
+            }
+
+        } else {
+            setSecret({ name: '', password: '', profile: plans.length > 0 ? plans[0].id : '' });
+            // Force generate account number for new users
+            const generatedAccNum = `ACC-${String(Date.now()).slice(-6)}`;
+            setCustomer({ fullName: '', address: '', contactNumber: '', email: '', accountNumber: generatedAccNum, gps: '' });
+            setDueDate('');
+            setPlanType('prepaid');
+        }
+    }, [isOpen, initialData, plans, customers, profiles]);
+
+    useEffect(() => {
+        if (isOpen && !initialData && plans.length > 0 && !secret.profile) {
+            setSecret(s => ({...s, profile: plans[0].id}));
+        }
+    }, [isOpen, initialData, plans, secret.profile]);
+
+    // Check if portal account exists when editing, and set default for createPortalAccount
+    useEffect(() => {
+        if (!isOpen) return;
+        if (initialData) {
+            // Editing: check if portal account exists
+            setCreatePortalAccount(false); // default unchecked when editing
+            setPortalAccountExists(false);
+            if (selectedRouterId && initialData.name) {
+                fetch(`/api/client-portal/check-account?routerId=${encodeURIComponent(selectedRouterId)}&pppoeUsername=${encodeURIComponent(initialData.name)}`, {
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('authToken')}` }
+                })
+                .then(res => res.ok ? res.json() : { exists: false })
+                .then(data => {
+                    setPortalAccountExists(data.exists);
+                    // If no account exists, default to checked so it gets created
+                    if (!data.exists) {
+                        setCreatePortalAccount(true);
+                    }
+                })
+                .catch(() => { setPortalAccountExists(false); setCreatePortalAccount(true); });
+            }
+        } else {
+            // Adding new user: default to checked
+            setCreatePortalAccount(true);
+            setPortalAccountExists(false);
+        }
+    }, [isOpen, initialData, selectedRouterId]);
+
+
+    if (!isOpen) return null;
+    
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        const selectedPlan = plans.find(p => p.id === secret.profile);
+
+        // Validate: password is required when creating a NEW portal account during edit
+        if (createPortalAccount && !portalAccountExists && initialData && !secret.password) {
+            alert('Password is required to create a new client portal account. Please enter the PPPoE password.');
+            return;
+        }
+        
+        const secretPayload: PppSecretData = {
+            name: secret.name,
+            service: 'pppoe',
+            profile: initialData?.profile || 'default',
+            comment: initialData?.comment || '',
+            disabled: initialData?.disabled || 'false',
+        };
+
+        if (selectedPlan) {
+            secretPayload.profile = selectedPlan.pppoeProfile;
+        }
+
+        if (secret.password) {
+            secretPayload.password = secret.password;
+        }
+        onSave(secretPayload, customer, { dueDate, planId: secret.profile, planType }, { createPortalAccount });
+    }
+
+    return (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+            <div className="bg-white dark:bg-slate-800 rounded-lg shadow-xl w-full max-w-lg flex flex-col max-h-[90vh]">
+            <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+                <div className="p-6 overflow-y-auto">
+                     <h3 className="text-xl font-bold mb-4">{initialData ? `Edit User: ${initialData.name}` : 'Add New User'}</h3>
+                     <div className="space-y-4">
+                        <div><label>Username</label><input type="text" value={secret.name} onChange={e => setSecret(s => ({...s, name: e.target.value}))} disabled={!!initialData} required className="mt-1 w-full p-2 rounded-md bg-slate-100 dark:bg-slate-700 disabled:opacity-50" /></div>
+                        <div className="relative"><label>Password</label><input type={showPass ? 'text' : 'password'} value={secret.password} onChange={e => setSecret(s => ({...s, password: e.target.value}))} placeholder={initialData ? "Leave blank to keep old" : ""} required={!initialData} className="mt-1 w-full p-2 rounded-md bg-slate-100 dark:bg-slate-700" /><button type="button" onClick={() => setShowPass(!showPass)} className="absolute right-3 top-9">{showPass ? <EyeSlashIcon className="w-5 h-5"/> : <EyeIcon className="w-5 h-5"/>}</button></div>
+                        <div className="flex items-start gap-2 p-3 rounded-md bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800">
+                            <input
+                                type="checkbox"
+                                id="createPortalAccount"
+                                checked={createPortalAccount}
+                                onChange={e => setCreatePortalAccount(e.target.checked)}
+                                className="mt-0.5 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                            />
+                            <div className="text-sm text-blue-800 dark:text-blue-300">
+                                <label htmlFor="createPortalAccount" className="cursor-pointer select-none">
+                                    {portalAccountExists
+                                        ? 'Client portal account exists. Check to update portal credentials (username & password).'
+                                        : 'Create client portal account using this PPPoE username and password.'
+                                    }
+                                </label>
+                                {createPortalAccount && !portalAccountExists && initialData && !secret.password && (
+                                    <p className="text-xs text-amber-700 dark:text-amber-400 mt-1 font-medium">
+                                        ⚠ You must enter the password above to create the portal account.
+                                    </p>
+                                )}
+                            </div>
+                        </div>
+                        <div><label>Billing Plan</label><select value={secret.profile} onChange={e => setSecret(s => ({...s, profile: e.target.value}))} className="mt-1 w-full p-2 rounded-md bg-slate-100 dark:bg-slate-700">
+                            {initialData && <option value="">-- No Change --</option>}
+                            {plans.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                        </select></div>
+                        <hr className="my-4 border-slate-200 dark:border-slate-700" />
+                        <h4 className="font-semibold">Subscription Details</h4>
+                        <div>
+                            <label>Due Date & Time</label>
+                            <input type="datetime-local" value={dueDate} onChange={e => setDueDate(e.target.value)} className="mt-1 w-full p-2 rounded-md bg-slate-100 dark:bg-slate-700" />
+                            <p className="text-xs text-slate-500 mt-1">Leave blank for no expiration.</p>
+                        </div>
+                        <div>
+                            <label>Plan Type</label>
+                            <select value={planType} onChange={e => setPlanType(e.target.value as 'prepaid' | 'postpaid')} className="mt-1 block w-full bg-slate-100 dark:bg-slate-700 rounded-md p-2">
+                                <option value="prepaid">Prepaid</option>
+                                <option value="postpaid">Postpaid</option>
+                            </select>
+                        </div>
+                        <hr className="my-4 border-slate-200 dark:border-slate-700" />
+                        <h4 className="font-semibold">Customer Information (Optional)</h4>
+                        <div><label>Full Name</label><input type="text" value={customer.fullName} onChange={e => setCustomer(c => ({...c, fullName: e.target.value}))} className="mt-1 w-full p-2 rounded-md bg-slate-100 dark:bg-slate-700" /></div>
+                        <div><label>Full Address</label><input type="text" value={customer.address} onChange={e => setCustomer(c => ({...c, address: e.target.value}))} className="mt-1 w-full p-2 rounded-md bg-slate-100 dark:bg-slate-700" /></div>
+                        <div><label>GPS Coordinates</label><input type="text" value={customer.gps} onChange={e => setCustomer(c => ({...c, gps: e.target.value}))} placeholder="Halimbawa: 9.124384458488505, 125.5344096926807" className="mt-1 w-full p-2 rounded-md bg-slate-100 dark:bg-slate-700" /></div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div><label>Contact Number</label><input type="text" value={customer.contactNumber} onChange={e => setCustomer(c => ({...c, contactNumber: e.target.value}))} className="mt-1 w-full p-2 rounded-md bg-slate-100 dark:bg-slate-700" /></div>
+                            <div><label>Email</label><input type="email" value={customer.email} onChange={e => setCustomer(c => ({...c, email: e.target.value}))} className="mt-1 w-full p-2 rounded-md bg-slate-100 dark:bg-slate-700" /></div>
+                        </div>
+                        <div><label>Account Number</label><input type="text" value={customer.accountNumber} onChange={e => setCustomer(c => ({...c, accountNumber: e.target.value}))} className="mt-1 w-full p-2 rounded-md bg-slate-100 dark:bg-slate-700" /></div>
+                     </div>
+                </div>
+                 <div className="bg-slate-50 dark:bg-slate-900/50 px-6 py-3 flex justify-end gap-3 flex-shrink-0"><button type="button" onClick={onClose}>Cancel</button><button type="submit" disabled={isSubmitting}>Save</button></div>
+            </form>
+            </div>
+        </div>
+    )
+};
+
+// --- Users Management Sub-component ---
+const UsersManager: React.FC<{ selectedRouter: RouterConfigWithId, addSale: (saleData: Omit<SaleRecord, 'id'>) => Promise<void> }> = ({ selectedRouter, addSale }) => {
+    const { hasPermission } = useAuth();
+    const [secrets, setSecrets] = useState<PppSecret[]>([]);
+    const [profiles, setProfiles] = useState<PppProfile[]>([]);
+    const { plans } = useBillingPlans(selectedRouter.id);
+    const { settings: billingSettings } = useBillingSettings();
+    const { customers, addCustomer, updateCustomer, fetchCustomers } = useCustomers(selectedRouter.id);
+    const { settings: companySettings } = useCompanySettings();
+
+    const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    
+    const [isUserModalOpen, setUserModalOpen] = useState(false);
+    const [isPaymentModalOpen, setPaymentModalOpen] = useState(false);
+    const [isGraceModalOpen, setGraceModalOpen] = useState(false);
+    const [selectedSecret, setSelectedSecret] = useState<PppSecret | null>(null);
+    
+    // Sorting State
+    const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
+    
+    // Search State
+    const [searchTerm, setSearchTerm] = useState('');
+    const [searchInput, setSearchInput] = useState('');
+    const firstMatchRef = useRef<HTMLTableRowElement>(null);
+    const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    // Debounce search input — cancel pending debounce when applying immediately
+    const applySearchImmediately = useCallback((value: string) => {
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        setSearchTerm(value);
+    }, []);
+
+    useEffect(() => {
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        if (searchInput === '') {
+            setSearchTerm('');
+            return;
+        }
+        debounceRef.current = setTimeout(() => {
+            setSearchTerm(searchInput);
+        }, 300);
+
+        return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+    }, [searchInput]);
+
+    // Scroll to first match when search results change
+    useEffect(() => {
+        if (searchTerm && firstMatchRef.current) {
+            firstMatchRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }, [searchTerm]);
+
+    const fetchData = useCallback(async () => {
+        setIsLoading(true);
+        setError(null);
+        try {
+            const [secretsData, profilesData] = await Promise.all([
+                getPppSecrets(selectedRouter),
+                getPppProfiles(selectedRouter),
+                fetchCustomers() // from useCustomers hook
+            ]);
+            setSecrets(secretsData);
+            setProfiles(profilesData);
+            
+            // Debug logging
+            console.log(`[PPPoE Users] Loaded ${secretsData.length} secrets from MikroTik`);
+            console.log(`[PPPoE Users] Loaded ${customers.length} customers from database for router ${selectedRouter.id}`);
+        } catch (err) {
+            setError(`Failed to fetch PPPoE users: ${(err as Error).message}`);
+        } finally {
+            setIsLoading(false);
+        }
+    }, [selectedRouter, fetchCustomers]);
+
+    useEffect(() => { fetchData() }, [fetchData]);
+    
+    const combinedUsers = useMemo(() => {
+        return secrets.map(secret => {
+            // Try multiple matching strategies to find the customer
+            let customer = customers.find(c => c.username === secret.name);
+            
+            // Fallback 1: Try matching by username AND routerId (more precise)
+            if (!customer) {
+                customer = customers.find(c => c.username === secret.name && c.routerId === selectedRouter.id);
+            }
+            
+            // Fallback 2: Try matching by parsing accountNumber from secret.comment
+            if (!customer && secret.comment) {
+                try {
+                    const parsedComment = JSON.parse(secret.comment);
+                    if (parsedComment.accountNumber) {
+                        customer = customers.find(c => c.accountNumber === parsedComment.accountNumber);
+                    }
+                } catch (e) { /* ignore parse errors */ }
+            }
+            
+            // Fallback 3: Try matching by fullName if stored in comment
+            if (!customer && secret.comment) {
+                try {
+                    const parsedComment = JSON.parse(secret.comment);
+                    if (parsedComment.customerName || parsedComment.fullName) {
+                        const nameToMatch = parsedComment.customerName || parsedComment.fullName;
+                        customer = customers.find(c => c.fullName === nameToMatch);
+                    }
+                } catch (e) { /* ignore parse errors */ }
+            }
+            
+            let subscription: { plan: string; dueDate: string; planType: 'prepaid' | 'postpaid'; planId?: string } = { plan: 'N/A', dueDate: 'No Info', planType: 'prepaid' };
+            if (secret.comment) {
+                try { 
+                    const parsedComment = JSON.parse(secret.comment);
+                    subscription.plan = parsedComment.planName || parsedComment.plan || 'N/A';
+                    subscription.planId = parsedComment.planId || subscription.planId;
+                    if (parsedComment.dueDateTime) {
+                        const s = String(parsedComment.dueDateTime);
+                        const [date, time] = s.includes('T') ? s.split('T') : [s.split(' ')[0], s.split(' ')[1] || '00:00'];
+                        const [y, m, d] = date.split('-');
+                        const [hh, mm] = (time || '00:00').split(':');
+                        subscription.dueDate = `${y}-${m}-${d} ${hh}:${mm}`;
+                    } else {
+                        subscription.dueDate = parsedComment.dueDate || 'No Info';
+                    }
+                    const pt = String(parsedComment.planType || '').toLowerCase().trim();
+                    subscription.planType = pt === 'postpaid' ? 'postpaid' : 'prepaid';
+                } catch (e) { /* ignore */ } }
+            return {
+                ...secret,
+                customer,
+                subscription
+            };
+        });
+    }, [secrets, customers, selectedRouter.id]);
+    
+    // Sorting Logic
+    const sortedUsers = useMemo(() => {
+        let sortableItems = [...combinedUsers];
+
+        // Apply Search with relevance ranking
+        if (searchTerm) {
+            const lowerTerm = searchTerm.toLowerCase().trim();
+            if (lowerTerm) {
+                // Filter matches
+                const matched = sortableItems.filter(user => 
+                    (user.name || '').toLowerCase().includes(lowerTerm) ||
+                    (user.customer?.fullName || '').toLowerCase().includes(lowerTerm) ||
+                    (user.customer?.accountNumber || '').toLowerCase().includes(lowerTerm) ||
+                    (user.profile || '').toLowerCase().includes(lowerTerm) ||
+                    (user.subscription?.plan || '').toLowerCase().includes(lowerTerm) ||
+                    (user.subscription?.dueDate || '').toLowerCase().includes(lowerTerm)
+                );
+
+                // Sort by relevance: username exact match > username starts with > name match > other field match
+                matched.sort((a, b) => {
+                    const aName = (a.name || '').toLowerCase();
+                    const bName = (b.name || '').toLowerCase();
+                    const aFull = (a.customer?.fullName || '').toLowerCase();
+                    const bFull = (b.customer?.fullName || '').toLowerCase();
+                    const aAcct = (a.customer?.accountNumber || '').toLowerCase();
+                    const bAcct = (b.customer?.accountNumber || '').toLowerCase();
+
+                    const aScore = aName === lowerTerm ? 0 : aName.startsWith(lowerTerm) ? 1 : aFull.startsWith(lowerTerm) ? 2 : aAcct.startsWith(lowerTerm) ? 3 : 4;
+                    const bScore = bName === lowerTerm ? 0 : bName.startsWith(lowerTerm) ? 1 : bFull.startsWith(lowerTerm) ? 2 : bAcct.startsWith(lowerTerm) ? 3 : 4;
+
+                    if (aScore !== bScore) return aScore - bScore;
+                    return aName.localeCompare(bName);
+                });
+
+                sortableItems = matched;
+            }
+        }
+
+        if (sortConfig !== null) {
+            sortableItems.sort((a, b) => {
+                let aValue: any = '';
+                let bValue: any = '';
+
+                switch (sortConfig.key) {
+                    case 'username':
+                        aValue = (a.name || '').toLowerCase();
+                        bValue = (b.name || '').toLowerCase();
+                        break;
+                    case 'profile':
+                        aValue = (a.profile || '').toLowerCase();
+                        bValue = (b.profile || '').toLowerCase();
+                        break;
+                    case 'planType':
+                        aValue = (a.subscription.planType || '').toLowerCase();
+                        bValue = (b.subscription.planType || '').toLowerCase();
+                        break;
+                    case 'subscriptionDue':
+                         const getTimestamp = (u: any) => {
+                             if (!u.subscription.dueDate || u.subscription.dueDate === 'No Info') return sortConfig.direction === 'asc' ? Infinity : -Infinity;
+                             // dueDate format is YYYY-MM-DD HH:mm
+                             return new Date(u.subscription.dueDate).getTime();
+                         };
+                         aValue = getTimestamp(a);
+                         bValue = getTimestamp(b);
+                        break;
+                    default:
+                        return 0;
+                }
+
+                if (aValue < bValue) {
+                    return sortConfig.direction === 'asc' ? -1 : 1;
+                }
+                if (aValue > bValue) {
+                    return sortConfig.direction === 'asc' ? 1 : -1;
+                }
+                return 0;
+            });
+        }
+        return sortableItems;
+    }, [combinedUsers, sortConfig, searchTerm]);
+
+    const requestSort = (key: string) => {
+        let direction: 'asc' | 'desc' = 'asc';
+        if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
+            direction = 'desc';
+        }
+        setSortConfig({ key, direction });
+    };
+
+    const handleSaveUser = async (secretData: PppSecretData, customerData: Partial<Customer>, subscriptionData: { dueDate: string; planId: string; planType?: 'prepaid' | 'postpaid' }, portalOptions?: { createPortalAccount?: boolean }) => {
+        setIsSubmitting(true);
+        try {
+            // Find existing customer by username (username is UNIQUE in the customers table)
+            let existingCustomer = customers.find(c => c.username === secretData.name);
+            
+            // If not found in local array, try to fetch from backend directly
+            if (!existingCustomer) {
+                try {
+                    console.log(`[PPPoE Save] Customer not in local array, fetching from backend for user: ${secretData.name}`);
+                    // Fetch without routerId filter since username is UNIQUE
+                    const allCustomers = await dbApi.get<any[]>(`/customers`);
+                    console.log(`[PPPoE Save] Backend returned ${allCustomers.length} customers`);
+                    existingCustomer = allCustomers.find(c => c.username === secretData.name);
+                    if (existingCustomer) {
+                        console.log(`[PPPoE Save] ✓ Found existing customer from backend: ${existingCustomer.id}, accountNumber: ${existingCustomer.accountNumber}`);
+                    } else {
+                        console.log(`[PPPoE Save] ✗ Customer not found in backend either`);
+                    }
+                } catch (e) {
+                    console.error('[PPPoE Save] Failed to fetch customers from backend:', e);
+                }
+            }
+            
+            const selectedPlan = plans.find(p => p.id === subscriptionData.planId);
+
+            // CRITICAL: Preserve existing account number - NEVER generate new one if customer exists
+            const existingAccountNumber = existingCustomer?.accountNumber || '';
+            
+            // Build enriched customer data
+            let enrichedCustomerData = {
+                ...customerData,
+                dueDate: subscriptionData.dueDate,
+                planType: subscriptionData.planType,
+                planName: selectedPlan?.name,
+                password: secretData.password,
+                // ALWAYS use existing account number if available, only generate if truly new customer
+                accountNumber: existingAccountNumber || customerData.accountNumber || `ACC-${String(Date.now()).slice(-6)}`
+            };
+            
+            console.log(`[PPPoE Save] Final account number: ${enrichedCustomerData.accountNumber} (existing: ${existingAccountNumber}, from form: ${customerData.accountNumber})`);
+
+            // Construct comment based on subscription and customer data
+            let commentJson: any = {};
+            try {
+                if (selectedSecret?.comment) {
+                    commentJson = JSON.parse(selectedSecret.comment);
+                }
+            } catch (e) { /* ignore malformed comment */ }
+
+            // Always include accountNumber in the comment
+            commentJson.accountNumber = enrichedCustomerData.accountNumber;
+
+            if (subscriptionData.dueDate) {
+                commentJson.dueDate = subscriptionData.dueDate.split('T')[0];
+                commentJson.dueDateTime = subscriptionData.dueDate;
+            } else {
+                delete commentJson.dueDate; // Remove due date if field is cleared
+                delete commentJson.dueDateTime;
+            }
+            
+            if (selectedPlan) {
+                secretData.profile = selectedPlan.pppoeProfile; // Set the actual profile on the secret
+                commentJson.plan = selectedPlan.name;
+                commentJson.price = selectedPlan.price;
+                commentJson.currency = selectedPlan.currency;
+            }
+            if (subscriptionData.planType) {
+                const pt = String(subscriptionData.planType).toLowerCase().trim();
+                commentJson.planType = pt === 'postpaid' ? 'postpaid' : 'prepaid';
+            }
+            // Persist customer info in comment on the secret
+            if (customerData) {
+                commentJson.customer = {
+                    fullName: customerData.fullName || '',
+                    address: customerData.address || '',
+                    contactNumber: customerData.contactNumber || '',
+                    email: customerData.email || '',
+                    gps: customerData.gps || '',
+                    accountNumber: enrichedCustomerData.accountNumber
+                };
+            }
+            secretData.comment = JSON.stringify(commentJson);
+
+            // This new service function handles secret creation/update and scheduler management
+            await savePppUser(selectedRouter, {
+                initialSecret: selectedSecret,
+                secretData,
+                subscriptionData: { ...subscriptionData, nonPaymentProfile: billingSettings.nonPaymentProfile },
+                customerData: enrichedCustomerData,
+            });
+
+            // Update local customer DB - always save even if only username exists
+            if (existingCustomer) {
+                console.log(`[PPPoE Save] Updating existing customer: ${existingCustomer.id} with accountNumber: ${enrichedCustomerData.accountNumber}`);
+                await updateCustomer({ ...existingCustomer, ...enrichedCustomerData });
+            } else {
+                // Always create customer record with at least username and account number
+                const alreadyExists = customers.find(c => c.username === secretData.name);
+                if (!alreadyExists) {
+                    console.log(`[PPPoE Save] Creating new customer with accountNumber: ${enrichedCustomerData.accountNumber}`);
+                    await addCustomer({ 
+                        routerId: selectedRouter.id, 
+                        username: secretData.name, 
+                        ...enrichedCustomerData 
+                    });
+                } else {
+                    console.log(`[PPPoE Save] Customer already exists, updating with accountNumber: ${enrichedCustomerData.accountNumber}`);
+                    await updateCustomer({ ...alreadyExists, ...enrichedCustomerData });
+                }
+            }
+
+            // Generate PDF application form
+            try {
+                const planData = selectedPlan ? {
+                    name: selectedPlan.name,
+                    price: selectedPlan.price,
+                    currency: selectedPlan.currency,
+                    cycleDays: selectedPlan.cycle_days || 30,
+                    speedLimit: selectedPlan.speedLimit || '',
+                    planType: subscriptionData.planType || 'prepaid'
+                } : null;
+
+                // Delete existing application if this is an edit
+                if (selectedSecret && existingCustomer?.applicationId) {
+                    await deleteApplication(existingCustomer.applicationId);
+                }
+
+                // Generate new application form
+                const applicationResult = await generateApplicationForm({
+                    userData: {
+                        name: secretData.name,
+                        phone: enrichedCustomerData.contactNumber || '',
+                        email: enrichedCustomerData.email || ''
+                    },
+                    customerData: {
+                        fullName: enrichedCustomerData.fullName || '',
+                        address: enrichedCustomerData.address || '',
+                        contactNumber: enrichedCustomerData.contactNumber || '',
+                        email: enrichedCustomerData.email || '',
+                        accountNumber: enrichedCustomerData.accountNumber || '',
+                        gps: enrichedCustomerData.gps || ''
+                    },
+                    planData,
+                    companySettings,
+                    source: 'pppoe'
+                });
+
+                // Update customer with application ID
+                if (existingCustomer) {
+                    await updateCustomer({ ...existingCustomer, applicationId: applicationResult.id });
+                } else {
+                    const customer = customers.find(c => c.username === secretData.name);
+                    if (customer) {
+                        await updateCustomer({ ...customer, applicationId: applicationResult.id });
+                    }
+                }
+            } catch (pdfError) {
+                console.error('Failed to generate PDF application form:', pdfError);
+                // Continue with the save process even if PDF generation fails
+            }
+
+            // Auto-create or update client portal account if checkbox was checked
+            if (portalOptions?.createPortalAccount) {
+                try {
+                    const portalRes = await fetch('/api/client-portal/auto-create', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${localStorage.getItem('authToken')}`
+                        },
+                        body: JSON.stringify({
+                            routerId: selectedRouter.id,
+                            pppoeUsername: secretData.name,
+                            password: secretData.password || undefined, // Only send if provided
+                            accountNumber: enrichedCustomerData.accountNumber
+                        })
+                    });
+                    const portalData = await portalRes.json();
+                    if (!portalRes.ok) {
+                        console.warn('[PPPoE Save] Failed to create/update portal account:', portalData.message);
+                    } else {
+                        console.log(`[PPPoE Save] Portal account ${portalData.created ? 'created' : 'updated'} successfully`);
+                    }
+                } catch (portalError) {
+                    console.warn('[PPPoE Save] Failed to create/update portal account:', portalError);
+                    // Don't block the save process if portal account creation fails
+                }
+            }
+            
+            setUserModalOpen(false);
+            setSelectedSecret(null);
+            await fetchData();
+        } catch(err) {
+            alert(`Failed to save user: ${(err as Error).message}`);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+    
+    const handleDeleteUser = async (secretId: string) => {
+        if (!window.confirm("Are you sure?")) return;
+        try {
+            await deletePppSecret(selectedRouter, secretId);
+            await fetchData();
+        } catch (err) { alert(`Error deleting user: ${(err as Error).message}`); }
+    };
+
+    const handlePayment = async ({ sale, payment }: any) => {
+        if (!selectedSecret) return false;
+        try {
+            await processPppPayment(selectedRouter, { secret: selectedSecret, ...payment });
+            await addSale({ ...sale, routerName: selectedRouter.name, date: new Date().toISOString() });
+            await fetchData();
+            return true;
+        } catch (err) {
+            alert(`Payment failed: ${(err as Error).message}`);
+            return false;
+        }
+    };
+
+    const handleGraceSave = async ({ graceDays, graceTime }: { graceDays: number; graceTime: string }) => {
+        if (!selectedSecret) return false;
+        try {
+            const sub = (selectedSecret as any).subscription || {};
+            const planByName = plans.find(p => p.name === sub.plan);
+            const planById = sub.planId ? plans.find(p => p.id === sub.planId) : undefined;
+            const chosenPlan = planByName || planById;
+            const chosenProfile = chosenPlan?.pppoeProfile || selectedSecret.profile;
+            const secretData: PppSecretData = {
+                name: selectedSecret.name,
+                service: 'pppoe',
+                profile: chosenProfile,
+                comment: selectedSecret.comment,
+                disabled: selectedSecret.disabled,
+            };
+            await savePppUser(selectedRouter, {
+                initialSecret: selectedSecret,
+                secretData,
+                subscriptionData: { dueDate: '', nonPaymentProfile: billingSettings.nonPaymentProfile, graceDays, graceTime, planId: chosenPlan?.id }
+            });
+            setGraceModalOpen(false);
+            await fetchData();
+            return true;
+        } catch (err) {
+            alert(`Failed to grant grace: ${(err as Error).message}`);
+            return false;
+        }
+    };
+    
+    if (isLoading) return <div className="flex justify-center p-8"><Loader /></div>;
+    if (error) return <div className="p-4 text-red-600">{error}</div>;
+
+    return (
+        <div>
+            <UserFormModal 
+                isOpen={isUserModalOpen} 
+                onClose={() => setUserModalOpen(false)} 
+                onSave={handleSaveUser} 
+                initialData={selectedSecret} 
+                plans={plans} 
+                customers={customers}
+                profiles={profiles}
+                isSubmitting={isSubmitting}
+                selectedRouterId={selectedRouter?.id}
+            />
+            <PaymentModal isOpen={isPaymentModalOpen} onClose={() => setPaymentModalOpen(false)} secret={selectedSecret} plans={plans} nonPaymentProfile={billingSettings.nonPaymentProfile} onSave={handlePayment} companySettings={companySettings} />
+            <GracePeriodModal isOpen={isGraceModalOpen} onClose={() => setGraceModalOpen(false)} subject={selectedSecret} nonPaymentProfile={billingSettings.nonPaymentProfile} defaultGraceDays={billingSettings.gracePeriodDays} onSave={handleGraceSave} />
+
+             <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-4 gap-4">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 w-full md:w-auto">
+                    <div className="relative w-full sm:w-64">
+                        <input
+                            type="text"
+                            placeholder="Search users..."
+                            value={searchInput}
+                            onChange={(e) => setSearchInput(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                    applySearchImmediately(searchInput);
+                                }
+                            }}
+                            className="w-full pl-10 pr-4 py-2 rounded-lg border dark:border-slate-600 dark:bg-slate-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+                        />
+                        <button 
+                            className="absolute left-3 top-2.5 text-slate-400 hover:text-primary-500 focus:outline-none"
+                            onClick={() => applySearchImmediately(searchInput)}
+                        >
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                            </svg>
+                        </button>
+                    </div>
+                    <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400 text-sm font-medium">
+                         <UsersIcon className="w-5 h-5 text-blue-500" />
+                         <span>Total Users: {secrets.length}</span>
+                    </div>
+                </div>
+                <div className="flex gap-2">
+                    <button
+                        onClick={async () => {
+                            if (!confirm('This will sync all PPPoE users between Local Database and Cloud. Missing users will be restored/backed up. Continue?')) return;
+                            setIsLoading(true);
+                            try {
+                                const data = await dbApi.post<{ message: string, stats: { toCloud: number, toLocal: number, updatedLocal: number } }>('/customers/sync', {});
+                                alert(`Sync Complete!\nTo Cloud: ${data.stats.toCloud}\nTo Local: ${data.stats.toLocal}\nUpdated Local: ${data.stats.updatedLocal}`);
+                                fetchData();
+                            } catch (e) {
+                                alert(`Sync failed: ${(e as Error).message}`);
+                            } finally {
+                                setIsLoading(false);
+                            }
+                        }}
+                        className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-lg flex items-center gap-2"
+                        disabled={isLoading}
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clipRule="evenodd" />
+                        </svg>
+                        Sync All
+                    </button>
+                    <button onClick={() => { setSelectedSecret(null); setUserModalOpen(true); }} className="bg-[--color-primary-600] text-white font-bold py-2 px-4 rounded-lg">Add New User</button>
+                </div>
+            </div>
+            <div className="bg-white dark:bg-slate-800 rounded-lg shadow-md overflow-hidden">
+                {/* Mobile card view */}
+                <div className="md:hidden divide-y divide-slate-200 dark:divide-slate-700">
+                    {sortedUsers.length === 0 ? (
+                        <div className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
+                            {searchTerm ? (
+                                <div className="flex flex-col items-center gap-2">
+                                    <svg className="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                                    </svg>
+                                    <p>No users found matching "{searchTerm}"</p>
+                                </div>
+                            ) : (
+                                <p>No PPPoE users found.</p>
+                            )}
+                        </div>
+                    ) : (
+                        sortedUsers.map((user, index) => {
+                            const isPostpaid = user.subscription.planType === 'postpaid';
+                            let isDue = false;
+                            try {
+                                if (user.comment) {
+                                    const parsed = JSON.parse(user.comment);
+                                    if (parsed.dueDateTime) {
+                                        isDue = new Date(parsed.dueDateTime).getTime() <= Date.now();
+                                    } else if (parsed.dueDate) {
+                                        const dt = new Date(`${parsed.dueDate}T23:59:59`);
+                                        isDue = dt.getTime() <= Date.now();
+                                    }
+                                }
+                            } catch (_) {}
+                            const profileName = (user.profile || '').toLowerCase();
+                            const isNonPayProfile = ['non-payment','nonpayment','cut','disable','disabled'].some(tag => profileName.includes(tag));
+                            const showGrace = isPostpaid && (isDue || isNonPayProfile);
+                            return (
+                                <div
+                                    key={user.id}
+                                    ref={index === 0 && searchTerm ? firstMatchRef : undefined}
+                                    className={`p-4 ${user.disabled === 'true' ? 'opacity-50' : ''} ${index === 0 && searchTerm ? 'ring-2 ring-primary-400 ring-inset' : ''}`}
+                                >
+                                    <div className="flex justify-between items-start gap-2 mb-3">
+                                        <div className="min-w-0 flex-1">
+                                            <p className="font-semibold text-slate-900 dark:text-slate-100 truncate">
+                                                <HighlightText text={user.name || ''} highlight={searchTerm} />
+                                            </p>
+                                            <p className="text-xs text-slate-500 truncate">
+                                                <HighlightText text={user.customer?.fullName || ''} highlight={searchTerm} />
+                                            </p>
+                                        </div>
+                                        {isPostpaid ? (
+                                            <span className="shrink-0 px-2 py-1 text-xs font-semibold rounded-full bg-violet-100 text-violet-800 dark:bg-violet-500/20 dark:text-violet-300">Postpaid</span>
+                                        ) : (
+                                            <span className="shrink-0 px-2 py-1 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-300">Prepaid</span>
+                                        )}
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2 text-xs mb-3">
+                                        <div>
+                                            <div className="text-slate-400 uppercase text-[10px] font-bold">Account #</div>
+                                            <div className="text-slate-700 dark:text-slate-200 truncate">
+                                                <HighlightText text={user.customer?.accountNumber || '—'} highlight={searchTerm} />
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="text-slate-400 uppercase text-[10px] font-bold">Profile</div>
+                                            <div className="text-slate-700 dark:text-slate-200 truncate">
+                                                <HighlightText text={user.profile || '—'} highlight={searchTerm} />
+                                            </div>
+                                        </div>
+                                        <div className="col-span-2">
+                                            <div className="text-slate-400 uppercase text-[10px] font-bold">Subscription Due</div>
+                                            <div className="text-slate-700 dark:text-slate-200">
+                                                <HighlightText text={user.subscription.dueDate || '—'} highlight={searchTerm} />
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <button
+                                            onClick={() => { setSelectedSecret(user); setPaymentModalOpen(true); }}
+                                            className="px-3 py-2 text-sm bg-green-600 text-white rounded-md font-semibold hover:bg-green-700 transition-colors"
+                                        >
+                                            Pay
+                                        </button>
+                                        <button
+                                            onClick={() => { setSelectedSecret(user); setUserModalOpen(true); }}
+                                            className="px-3 py-2 text-sm bg-sky-600 text-white rounded-md font-semibold hover:bg-sky-700 transition-colors"
+                                        >
+                                            Edit
+                                        </button>
+                                        {showGrace && (
+                                            <button
+                                                onClick={() => { setSelectedSecret(user); setGraceModalOpen(true); }}
+                                                className="px-3 py-2 text-sm bg-purple-600 text-white rounded-md font-semibold hover:bg-purple-700 transition-colors col-span-2"
+                                            >
+                                                Grace
+                                            </button>
+                                        )}
+                                        <button
+                                            className={`px-3 py-2 text-sm rounded-md font-semibold transition-colors ${
+                                                user.disabled === 'true'
+                                                ? 'bg-slate-500 text-white hover:bg-slate-600'
+                                                : 'bg-teal-600 text-white hover:bg-teal-700'
+                                            }`}
+                                            onClick={async () => {
+                                                if (!window.confirm(`Are you sure you want to ${user.disabled === 'true' ? 'enable' : 'disable'} this account?`)) return;
+                                                try {
+                                                    await savePppUser(selectedRouter, {
+                                                        initialSecret: user,
+                                                        secretData: { ...user, disabled: user.disabled === 'true' ? 'false' : 'true' },
+                                                        subscriptionData: user.subscription
+                                                    });
+                                                    await fetchData();
+                                                } catch (err) {
+                                                    alert(`Failed to update status: ${(err as Error).message}`);
+                                                }
+                                            }}
+                                        >
+                                            {user.disabled === 'true' ? 'Enable' : 'Disable'}
+                                        </button>
+                                        {hasPermission('pppoe_users:delete') && (
+                                            <button
+                                                onClick={() => handleDeleteUser(user.id)}
+                                                className="px-3 py-2 text-sm bg-red-600 text-white rounded-md font-semibold hover:bg-red-700 transition-colors"
+                                            >
+                                                Delete
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })
+                    )}
+                </div>
+                {/* Desktop table view */}
+                <div className="hidden md:block overflow-x-auto">
+                 <table className="w-full text-sm md:min-w-[900px]">
+                    <thead className="text-xs uppercase bg-slate-50 dark:bg-slate-900/50">
+                        <tr>
+                            <th 
+                                className="px-6 py-3 cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors select-none"
+                                onClick={() => requestSort('username')}
+                            >
+                                <div className="flex items-center justify-center gap-1">
+                                    Username/Customer
+                                    {sortConfig?.key === 'username' && (
+                                        <span>{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>
+                                    )}
+                                </div>
+                            </th>
+                            <th 
+                                className="px-6 py-3 cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors select-none"
+                                onClick={() => requestSort('accountNumber')}
+                            >
+                                <div className="flex items-center justify-center gap-1">
+                                    Account Number
+                                    {sortConfig?.key === 'accountNumber' && (
+                                        <span>{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>
+                                    )}
+                                </div>
+                            </th>
+                            <th 
+                                className="px-6 py-3 cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors select-none"
+                                onClick={() => requestSort('profile')}
+                            >
+                                <div className="flex items-center justify-center gap-1">
+                                    Profile
+                                    {sortConfig?.key === 'profile' && (
+                                        <span>{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>
+                                    )}
+                                </div>
+                            </th>
+                            <th 
+                                className="px-6 py-3 cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors select-none"
+                                onClick={() => requestSort('planType')}
+                            >
+                                <div className="flex items-center justify-center gap-1">
+                                    Plan Type
+                                    {sortConfig?.key === 'planType' && (
+                                        <span>{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>
+                                    )}
+                                </div>
+                            </th>
+                            <th 
+                                className="px-6 py-3 cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors select-none"
+                                onClick={() => requestSort('subscriptionDue')}
+                            >
+                                <div className="flex items-center justify-center gap-1">
+                                    Subscription Due
+                                    {sortConfig?.key === 'subscriptionDue' && (
+                                        <span>{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>
+                                    )}
+                                </div>
+                            </th>
+                            <th className="px-6 py-3 text-right">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {sortedUsers.length === 0 ? (
+                            <tr>
+                                <td colSpan={6} className="px-6 py-8 text-center text-slate-500 dark:text-slate-400">
+                                    {searchTerm ? (
+                                        <div className="flex flex-col items-center gap-2">
+                                            <svg className="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                                            </svg>
+                                            <p>No users found matching "{searchTerm}"</p>
+                                        </div>
+                                    ) : (
+                                        <p>No PPPoE users found.</p>
+                                    )}
+                                </td>
+                            </tr>
+                        ) : (
+                            sortedUsers.map((user, index) => (
+                                <tr key={user.id} ref={index === 0 && searchTerm ? firstMatchRef : undefined} className={`border-b dark:border-slate-700 ${user.disabled === 'true' ? 'opacity-50' : ''} ${index === 0 && searchTerm ? 'ring-2 ring-primary-400 ring-offset-1' : ''}`}>
+                                    <td className="px-6 py-4 font-medium text-center">
+                                        <p className="text-slate-900 dark:text-slate-100">
+                                            <HighlightText text={user.name || ''} highlight={searchTerm} />
+                                        </p>
+                                        <p className="text-xs text-slate-500">
+                                            <HighlightText text={user.customer?.fullName || ''} highlight={searchTerm} />
+                                        </p>
+                                    </td>
+                                    <td className="text-center">
+                                        {(() => {
+                                            // Try to get account number from customer first
+                                            let accNum = user.customer?.accountNumber;
+                                            
+                                            // Fallback: Extract from MikroTik comment if not in customer record
+                                            if (!accNum && user.comment) {
+                                                try {
+                                                    const parsedComment = JSON.parse(user.comment);
+                                                    accNum = parsedComment.accountNumber || parsedComment.customer?.accountNumber;
+                                                } catch (e) { /* ignore */ }
+                                            }
+                                            
+                                            return <HighlightText text={accNum || ''} highlight={searchTerm} />;
+                                        })()}
+                                    </td>
+                                    <td className="text-center">
+                                        <HighlightText text={user.profile || ''} highlight={searchTerm} />
+                                    </td>
+                                    <td className="text-center">
+                                        {user.subscription.planType === 'postpaid' ? (
+                                            <span className="px-2 py-1 text-xs font-semibold rounded-full bg-violet-100 text-violet-800 dark:bg-violet-500/20 dark:text-violet-300">
+                                                <HighlightText text="Postpaid" highlight={searchTerm} />
+                                            </span>
+                                        ) : (
+                                            <span className="px-2 py-1 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-300">
+                                                <HighlightText text="Prepaid" highlight={searchTerm} />
+                                            </span>
+                                        )}
+                                    </td>
+                                    <td className="text-center">
+                                        <HighlightText text={user.subscription.dueDate || ''} highlight={searchTerm} />
+                                    </td>
+                                    <td className="px-3 py-2 md:px-6 md:py-4 text-right">
+                                        <div className="flex flex-wrap gap-2 justify-end">
+                                        <button
+                                            onClick={() => { setSelectedSecret(user); setPaymentModalOpen(true); }}
+                                            className="px-3 py-1 text-sm bg-green-600 text-white rounded-md font-semibold hover:bg-green-700 transition-colors"
+                                            title="Process Payment"
+                                        >
+                                            Pay
+                                        </button>
+                                        {(() => {
+                                            const isPostpaid = user.subscription.planType === 'postpaid';
+                                            let isDue = false;
+                                            try {
+                                                if (user.comment) {
+                                                    const parsed = JSON.parse(user.comment);
+                                                    if (parsed.dueDateTime) {
+                                                        isDue = new Date(parsed.dueDateTime).getTime() <= Date.now();
+                                                    } else if (parsed.dueDate) {
+                                                        const dt = new Date(`${parsed.dueDate}T23:59:59`);
+                                                        isDue = dt.getTime() <= Date.now();
+                                                    }
+                                                }
+                                            } catch (_) {}
+                                            const profileName = (user.profile || '').toLowerCase();
+                                            const isNonPayProfile = ['non-payment','nonpayment','cut','disable','disabled'].some(tag => profileName.includes(tag));
+                                            return (isPostpaid && (isDue || isNonPayProfile)) ? (
+                                                <button
+                                                    onClick={() => { setSelectedSecret(user); setGraceModalOpen(true); }}
+                                                    className="px-3 py-1 text-sm bg-purple-600 text-white rounded-md font-semibold hover:bg-purple-700 transition-colors"
+                                                    title="Grant Grace Period"
+                                                >
+                                                    Grace
+                                                </button>
+                                            ) : null;
+                                        })()}
+                                        <button
+                                            onClick={() => { setSelectedSecret(user); setUserModalOpen(true); }}
+                                            className="px-3 py-1 text-sm bg-sky-600 text-white rounded-md font-semibold hover:bg-sky-700 transition-colors"
+                                            title="Edit User"
+                                        >
+                                            Edit
+                                        </button>
+                                        <button
+                                            className={`px-3 py-1 text-sm rounded-md font-semibold transition-colors ${
+                                                user.disabled === 'true' 
+                                                ? 'bg-slate-500 text-white hover:bg-slate-600' 
+                                                : 'bg-teal-600 text-white hover:bg-teal-700'
+                                            }`}
+                                            title={user.disabled === 'true' ? 'Enable Account' : 'Disable Account'}
+                                            onClick={async () => {
+                                                if (!window.confirm(`Are you sure you want to ${user.disabled === 'true' ? 'enable' : 'disable'} this account?`)) return;
+                                                try {
+                                                    await savePppUser(selectedRouter, {
+                                                        initialSecret: user,
+                                                        secretData: { ...user, disabled: user.disabled === 'true' ? 'false' : 'true' },
+                                                        subscriptionData: user.subscription // Preserve existing subscription data
+                                                    });
+                                                    await fetchData();
+                                                } catch (err) {
+                                                    alert(`Failed to update status: ${(err as Error).message}`);
+                                                }
+                                            }}
+                                        >
+                                            {user.disabled === 'true' ? 'Enable' : 'Disable'}
+                                        </button>
+                                        {hasPermission('pppoe_users:delete') && (
+                                            <button
+                                                onClick={() => handleDeleteUser(user.id)}
+                                                className="px-3 py-1 text-sm bg-red-600 text-white rounded-md font-semibold hover:bg-red-700 transition-colors"
+                                                title="Delete User"
+                                            >
+                                                Delete
+                                            </button>
+                                        )}
+                                        </div>
+                                    </td>
+                                </tr>
+                            ))
+                        )}
+                    </tbody>
+                </table>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// --- User Hover Card ---
+const UserHoverCard: React.FC<{
+    user: PppActiveConnection;
+    currentStats: { rx: number; tx: number };
+    position: { x: number; y: number };
+    lastUpdated: number;
+}> = ({ user, currentStats, position, lastUpdated }) => {
+    const [history, setHistory] = useState<TrafficHistoryPoint[]>([]);
+
+    // Safely parse stats to numbers to prevent crashes if API returns strings or invalid data
+    const safeRx = Number(currentStats?.rx);
+    const rx = isNaN(safeRx) ? 0 : safeRx;
+    const safeTx = Number(currentStats?.tx);
+    const tx = isNaN(safeTx) ? 0 : safeTx;
+
+    useEffect(() => {
+        const now = new Date();
+        const timeLabel = now.toLocaleTimeString([], { hour12: false });
+        
+        setHistory(prev => {
+            const newPoint = {
+                name: timeLabel,
+                rx: rx,
+                tx: tx
+            };
+            const newHistory = [...prev, newPoint];
+            if (newHistory.length > 30) newHistory.shift(); // Keep last 30 seconds
+            return newHistory;
+        });
+    }, [rx, tx, lastUpdated]);
+
+    const formatBits = (bits: number) => {
+        if (!bits || isNaN(bits)) return '0 bps';
+        if (bits < 1000) return `${bits.toFixed(0)} bps`;
+        const k = 1000;
+        const sizes = ['Kbps', 'Mbps', 'Gbps', 'Tbps'];
+        const i = Math.floor(Math.log(bits) / Math.log(k));
+        return `${(bits / Math.pow(k, i)).toFixed(2)} ${sizes[i - 1] || 'Kbps'}`;
+    };
+
+    // Calculate position to keep card on screen
+    // We assume the card is roughly 300px wide and 400px tall
+    const cardStyle: React.CSSProperties = {
+        position: 'fixed',
+        left: Math.min(position.x + 20, window.innerWidth - 320), // Prevent overflow right
+        top: Math.min(position.y + 10, window.innerHeight - 450), // Prevent overflow bottom
+        zIndex: 9999,
+        pointerEvents: 'none' // Let mouse events pass through so we don't flicker if mouse moves over it
+    };
+
+    return (
+        <div style={cardStyle} className="bg-white dark:bg-slate-800 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-700 w-[300px] animate-in fade-in zoom-in duration-200">
+            <div className="p-4 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 rounded-t-xl">
+                <h3 className="font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    {user.name}
+                </h3>
+                <div className="text-xs text-slate-500 mt-1 font-mono">{user.address || 'N/A'}</div>
+            </div>
+            
+            <div className="p-4 space-y-4">
+                 {/* Live Graph */}
+                <div className="h-[120px] -mx-2">
+                    <TrafficChart data={history} height={120} showXAxis={false} />
+                </div>
+                
+                {/* Stats Grid */}
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                     <div className="bg-slate-50 dark:bg-slate-900/50 p-2 rounded border border-slate-100 dark:border-slate-700">
+                        <div className="text-slate-400 uppercase text-[10px] font-bold">Download</div>
+                        <div className="font-mono font-bold text-emerald-500">{formatBits(rx)}</div>
+                    </div>
+                    <div className="bg-slate-50 dark:bg-slate-900/50 p-2 rounded border border-slate-100 dark:border-slate-700">
+                        <div className="text-slate-400 uppercase text-[10px] font-bold">Upload</div>
+                        <div className="font-mono font-bold text-sky-500">{formatBits(tx)}</div>
+                    </div>
+                </div>
+
+                {/* Details */}
+                <div className="space-y-1 pt-2 border-t border-slate-100 dark:border-slate-700">
+                     <div className="flex justify-between text-xs">
+                        <span className="text-slate-500">Service:</span>
+                        <span className="font-medium">{user.service || 'N/A'}</span>
+                    </div>
+                     <div className="flex justify-between text-xs">
+                        <span className="text-slate-500">Caller ID:</span>
+                        <span className="font-mono">{user['caller-id'] || 'N/A'}</span>
+                    </div>
+                     <div className="flex justify-between text-xs">
+                        <span className="text-slate-500">Uptime:</span>
+                        <span className="font-mono">{user.uptime || 'N/A'}</span>
+                    </div>
+                    {user.comment && (
+                        <div className="text-xs text-slate-500 italic mt-1 truncate">
+                            {user.comment}
+                        </div>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// --- Active Users Manager ---
+const ActiveUsersManager: React.FC<{ selectedRouter: RouterConfigWithId }> = ({ selectedRouter }) => {
+    const [activeUsers, setActiveUsers] = useState<PppActiveConnection[]>([]);
+    const [trafficStats, setTrafficStats] = useState<Record<string, { rx: number, tx: number }>>({});
+    const [hoveredUser, setHoveredUser] = useState<PppActiveConnection | null>(null);
+    const [hoverPosition, setHoverPosition] = useState<{x: number, y: number} | null>(null);
+    const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [isKicking, setIsKicking] = useState<string | null>(null);
+    const [lastUpdated, setLastUpdated] = useState(Date.now());
+    
+    // Sorting State
+    const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
+
+    const fetchData = useCallback(async () => {
+        setIsLoading(true);
+        setError(null);
+        try {
+            const data = await getPppActiveConnections(selectedRouter);
+            setActiveUsers(data);
+        } catch (err) {
+            setError(`Failed to fetch active connections: ${(err as Error).message}`);
+        } finally {
+            setIsLoading(false);
+        }
+    }, [selectedRouter]);
+
+    // Separate effect for traffic monitoring (polls faster or same rate)
+    useEffect(() => {
+        if (activeUsers.length === 0) return;
+        
+        const fetchTraffic = async () => {
+            const names = activeUsers.map(u => u.name);
+            try {
+                const stats = await getPppActiveTraffic(selectedRouter, names);
+                setTrafficStats(stats);
+                setLastUpdated(Date.now());
+            } catch (e) {
+                console.warn("Traffic fetch error", e);
+            }
+        };
+
+        fetchTraffic();
+        const interval = setInterval(fetchTraffic, 1000); // Update speeds every 1 second
+        return () => clearInterval(interval);
+    }, [activeUsers, selectedRouter]);
+
+    useEffect(() => {
+        fetchData();
+        const interval = setInterval(fetchData, 1000); // Poll list every 1 second
+        return () => clearInterval(interval);
+    }, [fetchData]);
+
+    const handleKickUser = async (connectionId: string) => {
+        if (!window.confirm("Are you sure you want to kick this user?")) return;
+        setIsKicking(connectionId);
+        try {
+            await deletePppActiveConnection(selectedRouter, connectionId);
+            await fetchData(); // Refresh data after kicking
+        } catch (err) {
+            alert(`Failed to kick user: ${(err as Error).message}`);
+        } finally {
+            setIsKicking(null);
+        }
+    };
+
+    const handleMouseEnter = (e: React.MouseEvent, user: PppActiveConnection) => {
+        setHoveredUser(user);
+        setHoverPosition({ x: e.clientX, y: e.clientY });
+    };
+
+    const handleMouseMove = (e: React.MouseEvent) => {
+        if (hoveredUser) {
+             setHoverPosition({ x: e.clientX, y: e.clientY });
+        }
+    };
+
+    const handleMouseLeave = () => {
+        setHoveredUser(null);
+        setHoverPosition(null);
+    };
+
+    const formatSpeed = (bits: number) => {
+        if (!bits) return '0 Mbps';
+        const mbps = bits / 1000000;
+        return `${mbps.toFixed(2)} Mbps`;
+    };
+
+    // Sorting Logic
+    const sortedActiveUsers = useMemo(() => {
+        let sortableItems = [...activeUsers];
+        if (sortConfig !== null) {
+            sortableItems.sort((a, b) => {
+                let aValue: any = '';
+                let bValue: any = '';
+
+                switch (sortConfig.key) {
+                    case 'username':
+                        aValue = (a.name || '').toLowerCase();
+                        bValue = (b.name || '').toLowerCase();
+                        break;
+                    case 'service':
+                        aValue = (a.service || '').toLowerCase();
+                        bValue = (b.service || '').toLowerCase();
+                        break;
+                    case 'address':
+                         const ipToNum = (ip: string) => {
+                            const parts = ip.split('.').map(Number);
+                            return parts.length === 4 ? parts[0] * 16777216 + parts[1] * 65536 + parts[2] * 256 + parts[3] : 0;
+                         };
+                         aValue = ipToNum(a.address || '');
+                         bValue = ipToNum(b.address || '');
+                        break;
+                    case 'callerId':
+                        aValue = (a['caller-id'] || '').toLowerCase();
+                        bValue = (b['caller-id'] || '').toLowerCase();
+                        break;
+                    case 'uptime':
+                        aValue = a.uptime || '';
+                        bValue = b.uptime || '';
+                        break;
+                    case 'traffic':
+                        const statsA = trafficStats[a.name] || { rx: 0, tx: 0 };
+                        const statsB = trafficStats[b.name] || { rx: 0, tx: 0 };
+                        aValue = (statsA.rx || 0) + (statsA.tx || 0);
+                        bValue = (statsB.rx || 0) + (statsB.tx || 0);
+                        break;
+                    default:
+                        return 0;
+                }
+
+                if (aValue < bValue) {
+                    return sortConfig.direction === 'asc' ? -1 : 1;
+                }
+                if (aValue > bValue) {
+                    return sortConfig.direction === 'asc' ? 1 : -1;
+                }
+                return 0;
+            });
+        }
+        return sortableItems;
+    }, [activeUsers, sortConfig, trafficStats]);
+
+    const requestSort = (key: string) => {
+        let direction: 'asc' | 'desc' = 'asc';
+        if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
+            direction = 'desc';
+        }
+        setSortConfig({ key, direction });
+    };
+
+    if (isLoading && activeUsers.length === 0) return <div className="flex justify-center p-8"><Loader /></div>;
+    if (error) return <div className="p-4 text-red-600">{error}</div>;
+
+    const freshHoveredUser = hoveredUser ? (activeUsers.find(u => u.name === hoveredUser.name) || hoveredUser) : null;
+
+    return (
+        <div className="bg-white dark:bg-slate-800 rounded-lg shadow-md overflow-hidden">
+            <div className="p-4 bg-slate-50 dark:bg-slate-900/50 border-b border-slate-200 dark:border-slate-700">
+                <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400">
+                    <SignalIcon className="w-5 h-5 text-emerald-500" />
+                    <span className="font-semibold">
+                        Found {activeUsers.length} online users (active connections)
+                    </span>
+                </div>
+            </div>
+            {freshHoveredUser && hoverPosition && (
+                <UserHoverCard 
+                    user={freshHoveredUser}
+                    currentStats={trafficStats[freshHoveredUser.name] || { rx: 0, tx: 0 }}
+                    position={hoverPosition}
+                    lastUpdated={lastUpdated}
+                />
+            )}
+            <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                    <thead className="text-xs uppercase bg-slate-50 dark:bg-slate-900/50">
+                        <tr>
+                            <th 
+                                className="px-6 py-3 text-center cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors select-none"
+                                onClick={() => requestSort('username')}
+                            >
+                                <div className="flex items-center justify-center gap-1">
+                                    Username
+                                    {sortConfig?.key === 'username' && (
+                                        <span>{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>
+                                    )}
+                                </div>
+                            </th>
+                            <th 
+                                className="px-6 py-3 text-center cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors select-none"
+                                onClick={() => requestSort('service')}
+                            >
+                                <div className="flex items-center justify-center gap-1">
+                                    Service
+                                    {sortConfig?.key === 'service' && (
+                                        <span>{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>
+                                    )}
+                                </div>
+                            </th>
+                            <th 
+                                className="px-6 py-3 text-center cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors select-none"
+                                onClick={() => requestSort('address')}
+                            >
+                                <div className="flex items-center justify-center gap-1">
+                                    IP Address
+                                    {sortConfig?.key === 'address' && (
+                                        <span>{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>
+                                    )}
+                                </div>
+                            </th>
+                            <th 
+                                className="px-6 py-3 text-center cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors select-none"
+                                onClick={() => requestSort('callerId')}
+                            >
+                                <div className="flex items-center justify-center gap-1">
+                                    Caller ID (MAC)
+                                    {sortConfig?.key === 'callerId' && (
+                                        <span>{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>
+                                    )}
+                                </div>
+                            </th>
+                            <th 
+                                className="px-6 py-3 text-center cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors select-none"
+                                onClick={() => requestSort('uptime')}
+                            >
+                                <div className="flex items-center justify-center gap-1">
+                                    Uptime
+                                    {sortConfig?.key === 'uptime' && (
+                                        <span>{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>
+                                    )}
+                                </div>
+                            </th>
+                            <th 
+                                className="px-6 py-3 text-center cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors select-none"
+                                onClick={() => requestSort('traffic')}
+                            >
+                                <div className="flex items-center justify-center gap-1">
+                                    Traffic (TX/RX)
+                                    {sortConfig?.key === 'traffic' && (
+                                        <span>{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>
+                                    )}
+                                </div>
+                            </th>
+                            <th className="px-6 py-3 text-center">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {sortedActiveUsers.map(user => {
+                            const stats = trafficStats[user.name] || { rx: 0, tx: 0 };
+                            return (
+                                <tr key={user.id} className="border-b dark:border-slate-700">
+                                    <td className="px-6 py-4 font-medium text-center">
+                                        <div
+                                            onMouseEnter={(e) => handleMouseEnter(e, user)}
+                                            onMouseMove={handleMouseMove}
+                                            onMouseLeave={handleMouseLeave}
+                                            className="text-blue-600 dark:text-blue-400 font-bold cursor-help inline-block border-b border-dotted border-blue-400"
+                                        >
+                                            {user.name}
+                                        </div>
+                                    </td>
+                                    <td className="px-6 py-4 text-center">{user.service}</td>
+                                    <td className="px-6 py-4 font-mono text-center">{user.address}</td>
+                                    <td className="px-6 py-4 font-mono text-center">{user['caller-id']}</td>
+                                    <td className="px-6 py-4 font-mono text-center">{user.uptime}</td>
+                                    <td className="px-6 py-4 font-mono text-xs text-center">
+                                        <div className="flex flex-col items-center">
+                                            <span className="text-green-600">▲ {formatSpeed(stats.tx)}</span>
+                                            <span className="text-blue-600">▼ {formatSpeed(stats.rx)}</span>
+                                        </div>
+                                    </td>
+                                    <td className="px-6 py-4 text-center">
+                                        <button 
+                                            onClick={() => handleKickUser(user.id)} 
+                                            disabled={isKicking === user.id}
+                                            className="px-3 py-1 text-sm bg-red-600 text-white rounded-md font-semibold disabled:opacity-50"
+                                        >
+                                            {isKicking === user.id ? 'Kicking...' : 'Kick'}
+                                        </button>
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                         {sortedActiveUsers.length === 0 && (
+                            <tr>
+                                <td colSpan={7} className="text-center py-8 text-slate-500">
+                                    No active PPPoE users.
+                                </td>
+                            </tr>
+                        )}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+};
+
+// --- Offline Users Manager ---
+const OfflineUsersManager: React.FC<{ selectedRouter: RouterConfigWithId }> = ({ selectedRouter }) => {
+    const [secrets, setSecrets] = useState<PppSecret[]>([]);
+    const [activeUsers, setActiveUsers] = useState<PppActiveConnection[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+
+    const fetchData = useCallback(async () => {
+        setIsLoading(true);
+        setError(null);
+        try {
+            const [secretsData, activeData] = await Promise.all([
+                getPppSecrets(selectedRouter),
+                getPppActiveConnections(selectedRouter)
+            ]);
+            setSecrets(secretsData);
+            setActiveUsers(activeData);
+        } catch (err) {
+            setError(`Failed to fetch data: ${(err as Error).message}`);
+        } finally {
+            setIsLoading(false);
+        }
+    }, [selectedRouter]);
+
+    useEffect(() => { fetchData(); }, [fetchData]);
+
+    const offlineUsers = useMemo(() => {
+        const activeNames = new Set(activeUsers.map(u => u.name));
+        return secrets.filter(s => !activeNames.has(s.name) && s.disabled !== 'true');
+    }, [secrets, activeUsers]);
+
+    if (isLoading) return <div className="flex justify-center p-8"><Loader /></div>;
+    if (error) return <div className="p-4 text-red-600">{error}</div>;
+
+    return (
+        <div className="bg-white dark:bg-slate-800 rounded-lg shadow-md overflow-hidden">
+            <div className="p-4 bg-slate-50 dark:bg-slate-900/50 border-b border-slate-200 dark:border-slate-700">
+                <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400">
+                    <ExclamationTriangleIcon className="w-5 h-5 text-amber-500" />
+                    <span className="font-semibold">
+                        Found {offlineUsers.length} offline users (enabled but not connected)
+                    </span>
+                </div>
+            </div>
+            <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                    <thead className="text-xs uppercase bg-slate-50 dark:bg-slate-900/50">
+                        <tr>
+                            <th className="px-6 py-3 text-center">Username</th>
+                            <th className="px-6 py-3 text-center">Profile</th>
+                            <th className="px-6 py-3 text-center">Service</th>
+                            <th className="px-6 py-3 text-center">Caller ID</th>
+                            <th className="px-6 py-3 text-center">Comment</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {offlineUsers.length === 0 ? (
+                            <tr>
+                                <td colSpan={5} className="text-center py-8 text-slate-500">
+                                    All enabled users are currently online!
+                                </td>
+                            </tr>
+                        ) : (
+                            offlineUsers.map(user => (
+                                <tr key={user.id} className="border-b dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                                    <td className="px-6 py-4 font-medium text-center text-slate-900 dark:text-slate-100">
+                                        {user.name}
+                                    </td>
+                                    <td className="px-6 py-4 text-center">{user.profile}</td>
+                                    <td className="px-6 py-4 text-center">{user.service}</td>
+                                    <td className="px-6 py-4 font-mono text-center text-slate-500">{user['caller-id'] || '-'}</td>
+                                    <td className="px-6 py-4 text-center text-slate-500 italic truncate max-w-xs">
+                                        {user.comment || '-'}
+                                    </td>
+                                </tr>
+                            ))
+                        )}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+};
+
+// --- Servers Management Sub-component ---
+const ServersManager: React.FC<{ selectedRouter: RouterConfigWithId }> = ({ selectedRouter }) => {
+    const { t } = useLocalization();
+    const [servers, setServers] = useState<PppServer[]>([]);
+    const [interfaces, setInterfaces] = useState<Interface[]>([]);
+    const [profiles, setProfiles] = useState<PppProfile[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [isModalOpen, setIsModalOpen] = useState(false);
+    const [editingServer, setEditingServer] = useState<PppServer | null>(null);
+
+    const fetchData = useCallback(async () => {
+        setIsLoading(true);
+        setError(null);
+        try {
+            const [serversData, interfacesData, profilesData] = await Promise.all([
+                getPppServers(selectedRouter),
+                getInterfaces(selectedRouter),
+                getPppProfiles(selectedRouter),
+            ]);
+            setServers(serversData);
+            setInterfaces(interfacesData.filter(i => i.type === 'bridge' || i.type === 'ether' || i.type === 'vlan'));
+            setProfiles(profilesData);
+        } catch (err) {
+            setError(`Could not fetch data: ${(err as Error).message}`);
+        } finally {
+            setIsLoading(false);
+        }
+    }, [selectedRouter]);
+
+    useEffect(() => { fetchData(); }, [fetchData]);
+
+    const handleSave = async (serverData: any, serverId?: string) => {
+        setIsSubmitting(true);
+        try {
+            const payload = { ...serverData };
+            if (Array.isArray(payload.authentication)) {
+                payload.authentication = payload.authentication.join(',');
+            }
+
+            if (serverId) {
+                await updatePppServer(selectedRouter, serverId, payload);
+            } else {
+                await addPppServer(selectedRouter, payload);
+            }
+            setIsModalOpen(false);
+            setEditingServer(null);
+            await fetchData();
+        } catch (err) {
+            alert(`Error saving server: ${(err as Error).message}`);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+    
+    const handleDelete = async (serverId: string) => {
+        if (!window.confirm("Are you sure? This will disconnect all users on this server.")) return;
+        try {
+            await deletePppServer(selectedRouter, serverId);
+            await fetchData();
+        } catch (err) {
+            alert(`Error deleting server: ${(err as Error).message}`);
+        }
+    };
+    
+    const ServerFormModal: React.FC<any> = ({ isOpen, onClose, onSave, initialData, isSubmitting }) => {
+        const [server, setServer] = useState<PppServerData>({ 'service-name': '', interface: '', 'default-profile': '', authentication: ['pap', 'chap', 'mschap1', 'mschap2'], disabled: 'false' });
+        
+        useEffect(() => {
+            if (isOpen) {
+                if (initialData) {
+                    setServer({
+                        'service-name': initialData['service-name'] || '',
+                        interface: initialData.interface,
+                        'default-profile': initialData['default-profile'],
+                        authentication: (initialData.authentication?.split(',') || []) as PppServerData['authentication'],
+                        disabled: initialData.disabled,
+                    });
+                } else {
+                     setServer({
+                        'service-name': 'pppoe-in',
+                        interface: interfaces.length > 0 ? interfaces[0].name : '',
+                        'default-profile': profiles.length > 0 ? profiles[0].name : '',
+                        authentication: ['pap', 'chap', 'mschap1', 'mschap2'],
+                        disabled: 'false',
+                    });
+                }
+            }
+        }, [initialData, isOpen, interfaces, profiles]);
+        
+        if (!isOpen) return null;
+
+        const handleAuthChange = (authMethod: string, checked: boolean) => {
+            setServer(s => ({
+                ...s,
+                authentication: checked
+                    ? [...s.authentication, authMethod as any]
+                    : s.authentication.filter(m => m !== authMethod)
+            }));
+        };
+
+        const handleSubmit = (e: React.FormEvent) => { e.preventDefault(); onSave(server, initialData?.id); };
+
+        return (
+             <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+                <div className="bg-white dark:bg-slate-800 rounded-lg shadow-xl w-full max-w-lg">
+                    <form onSubmit={handleSubmit}>
+                        <div className="p-6">
+                            <h3 className="text-xl font-bold mb-4">{initialData ? t('pppoe.edit_server') : t('pppoe.add_new_server')}</h3>
+                            <div className="space-y-4">
+                                <div><label>{t('pppoe.service_name')}</label><input value={server['service-name']} onChange={e => setServer(s => ({...s, 'service-name': e.target.value}))} required className="mt-1 block w-full bg-slate-100 dark:bg-slate-700 rounded-md p-2" /></div>
+                                <div><label>{t('pppoe.interface')}</label><select value={server.interface} onChange={e => setServer(s => ({...s, interface: e.target.value}))} className="mt-1 block w-full bg-slate-100 dark:bg-slate-700 rounded-md p-2">{interfaces.map(i => <option key={i.name} value={i.name}>{i.name}</option>)}</select></div>
+                                <div><label>{t('pppoe.default_profile')}</label><select value={server['default-profile']} onChange={e => setServer(s => ({...s, 'default-profile': e.target.value}))} className="mt-1 block w-full bg-slate-100 dark:bg-slate-700 rounded-md p-2">{profiles.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}</select></div>
+                                <div><label>{t('pppoe.authentication')}</label><div className="flex flex-wrap gap-4 mt-2">
+                                    {['pap','chap','mschap1','mschap2'].map(method => (
+                                        <label key={method} className="flex items-center gap-2"><input type="checkbox" checked={server.authentication.includes(method as any)} onChange={e => handleAuthChange(method, e.target.checked)} />{method}</label>
+                                    ))}
+                                </div></div>
+                                 <label className="flex items-center gap-2"><input type="checkbox" checked={server.disabled === 'true'} onChange={e => setServer(s => ({...s, disabled: e.target.checked ? 'true' : 'false'}))} /> Disabled</label>
+                            </div>
+                        </div>
+                        <div className="bg-slate-50 dark:bg-slate-900/50 px-6 py-3 flex justify-end gap-3"><button type="button" onClick={onClose}>Cancel</button><button type="submit" disabled={isSubmitting}>Save</button></div>
+                    </form>
+                </div>
+            </div>
+        );
+    };
+
+    if (isLoading) return <div className="flex justify-center p-8"><Loader /></div>;
+    if (error) return <div className="p-4 text-red-600">{error}</div>;
+
+    return (
+        <div>
+            <ServerFormModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} onSave={handleSave} initialData={editingServer} isSubmitting={isSubmitting} />
+            <div className="flex justify-end mb-4"><button onClick={() => { setEditingServer(null); setIsModalOpen(true); }} className="bg-[--color-primary-600] text-white font-bold py-2 px-4 rounded-lg">{t('pppoe.add_new_server')}</button></div>
+            <div className="bg-white dark:bg-slate-800 rounded-lg shadow-md overflow-hidden">
+                <table className="w-full text-sm"><thead className="text-xs uppercase bg-slate-50 dark:bg-slate-900/50">
+                    <tr><th className="px-6 py-3">Service</th><th className="px-6 py-3">Interface</th><th className="px-6 py-3">Default Profile</th><th className="px-6 py-3">Status</th><th className="px-6 py-3 text-right">Actions</th></tr></thead>
+                    <tbody>{servers.map(s => (
+                        <tr key={s.id} className={`border-b dark:border-slate-700 ${s.disabled === 'true' ? 'opacity-50' : ''}`}>
+                            <td className="px-6 py-4 font-medium">{s['service-name']}</td><td className="px-6 py-4">{s.interface}</td><td className="px-6 py-4">{s['default-profile']}</td>
+                            <td className="px-6 py-4">{s.disabled === 'true' ? <span className="text-red-500">Disabled</span> : <span className="text-green-500">Enabled</span>}</td>
+                            <td className="px-3 py-2 md:px-6 md:py-4 text-right"><div className="flex flex-wrap gap-2 justify-end"><button onClick={() => { setEditingServer(s); setIsModalOpen(true); }} className="p-1"><EditIcon className="w-5 h-5"/></button><button onClick={() => handleDelete(s.id)} className="p-1"><TrashIcon className="w-5 h-5"/></button></div></td>
+                        </tr>
+                    ))}</tbody>
+                </table>
+            </div>
+        </div>
+    );
+}
+
+
+// --- Payment Monitoring Component ---
+const PaymentMonitoring: React.FC<{ selectedRouter: RouterConfigWithId, addSale: (saleData: Omit<SaleRecord, 'id'>) => Promise<void> }> = ({ selectedRouter, addSale }) => {
+    const [secrets, setSecrets] = useState<PppSecret[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [filter, setFilter] = useState<'all' | 'paid' | 'unpaid'>('all');
+    const [searchTerm, setSearchTerm] = useState('');
+    const [isExporting, setIsExporting] = useState(false);
+
+    useEffect(() => {
+        fetchSecrets();
+    }, [selectedRouter]);
+
+    const fetchSecrets = async () => {
+        try {
+            setIsLoading(true);
+            const data = await getPppSecrets(selectedRouter);
+            setSecrets(data || []);
+        } catch (err) {
+            setError('Failed to fetch PPPoE users');
+            console.error(err);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const parseDueDate = (comment: string) => {
+        try {
+            const c = JSON.parse(comment || '{}');
+            return c.dueDateTime || c.dueDate || null;
+        } catch {
+            return null;
+        }
+    };
+
+    const exportToCSV = () => {
+        try {
+            setIsExporting(true);
+            
+            // Prepare CSV data
+            const headers = ['Username', 'Profile', 'Due Date', 'Payment Status', 'Days Remaining', 'Plan Name', 'Plan Type', 'Comment'];
+            const rows = filteredSecrets.map(secret => {
+                const paymentInfo = getCurrentMonthPayment(secret);
+                const status = getPaymentStatus(secret);
+                const dueDate = parseDueDate(secret.comment);
+                
+                let planName = '';
+                let planType = '';
+                try {
+                    const c = JSON.parse(secret.comment || '{}');
+                    planName = c.planName || c.plan || '';
+                    planType = c.planType || '';
+                } catch {}
+                
+                return [
+                    secret.name,
+                    secret.profile,
+                    paymentInfo?.dueDate ? paymentInfo.dueDate.toISOString().split('T')[0] : 'N/A',
+                    status === 'paid' ? 'Paid' : status === 'unpaid' ? 'Unpaid' : 'Unknown',
+                    paymentInfo ? (paymentInfo.isExpired ? `Expired ${Math.abs(paymentInfo.daysRemaining)} days ago` : `${paymentInfo.daysRemaining} days`) : 'N/A',
+                    planName,
+                    planType,
+                    secret.comment || ''
+                ];
+            });
+            
+            // Build CSV content
+            const csvContent = [
+                headers.join(','),
+                ...rows.map(row => row.map(cell => {
+                    // Escape quotes and wrap in quotes if contains comma
+                    const cellStr = String(cell).replace(/"/g, '""');
+                    return cellStr.includes(',') || cellStr.includes('"') || cellStr.includes('\n') 
+                        ? `"${cellStr}"` 
+                        : cellStr;
+                })).join(',')
+            ].join('\n');
+            
+            // Add UTF-8 BOM for Excel compatibility
+            const BOM = '\uFEFF';
+            const blob = new Blob([BOM + csvContent], { type: 'text/csv;charset=utf-8;' });
+            
+            // Create download link
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            link.setAttribute('href', url);
+            
+            // Generate filename with date and filter
+            const now = new Date();
+            const dateStr = now.toISOString().split('T')[0];
+            const filterSuffix = filter === 'all' ? 'all' : filter;
+            link.setAttribute('download', `pppoe_payment_${filterSuffix}_${dateStr}.csv`);
+            
+            // Trigger download
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+        } catch (err) {
+            console.error('Export to CSV failed:', err);
+            setError('Failed to export CSV');
+        } finally {
+            setIsExporting(false);
+        }
+    };
+
+    const getPaymentStatus = (secret: PppSecret) => {
+        const dueDate = parseDueDate(secret.comment);
+        if (!dueDate) return 'unknown';
+        
+        const now = new Date();
+        const due = new Date(dueDate);
+        
+        // Check if paid for current month (due date is in the future)
+        if (due > now) return 'paid';
+        return 'unpaid';
+    };
+
+    const getCurrentMonthPayment = (secret: PppSecret) => {
+        const dueDate = parseDueDate(secret.comment);
+        if (!dueDate) return null;
+        
+        const due = new Date(dueDate);
+        const now = new Date();
+        
+        return {
+            dueDate: due,
+            isCurrentMonth: due.getMonth() === now.getMonth() && due.getFullYear() === now.getFullYear(),
+            daysRemaining: Math.ceil((due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)),
+            isExpired: due < now
+        };
+    };
+
+    const filteredSecrets = useMemo(() => {
+        let filtered = secrets.filter(s => !s.disabled || s.disabled === 'false');
+        
+        // Apply payment filter
+        if (filter !== 'all') {
+            filtered = filtered.filter(s => getPaymentStatus(s) === filter);
+        }
+        
+        // Apply search filter
+        if (searchTerm) {
+            const term = searchTerm.toLowerCase();
+            filtered = filtered.filter(s => 
+                s.name.toLowerCase().includes(term) || 
+                s.profile.toLowerCase().includes(term) ||
+                (s.comment && s.comment.toLowerCase().includes(term))
+            );
+        }
+        
+        return filtered;
+    }, [secrets, filter, searchTerm]);
+
+    const stats = useMemo(() => {
+        const activeSecrets = secrets.filter(s => !s.disabled || s.disabled === 'false');
+        const paid = activeSecrets.filter(s => getPaymentStatus(s) === 'paid').length;
+        const unpaid = activeSecrets.filter(s => getPaymentStatus(s) === 'unpaid').length;
+        const unknown = activeSecrets.filter(s => getPaymentStatus(s) === 'unknown').length;
+        
+        return { total: activeSecrets.length, paid, unpaid, unknown };
+    }, [secrets]);
+
+    if (isLoading) {
+        return (
+            <div className="flex items-center justify-center p-12">
+                <Loader />
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
+                <p className="text-red-600 dark:text-red-400">{error}</p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="space-y-6">
+            {/* Stats Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
+                    <div className="text-sm text-slate-500 dark:text-slate-400">Total Users</div>
+                    <div className="text-2xl font-bold text-slate-800 dark:text-slate-200 mt-1">{stats.total}</div>
+                </div>
+                <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-4">
+                    <div className="text-sm text-green-600 dark:text-green-400">Paid This Month</div>
+                    <div className="text-2xl font-bold text-green-700 dark:text-green-300 mt-1">{stats.paid}</div>
+                </div>
+                <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
+                    <div className="text-sm text-red-600 dark:text-red-400">Unpaid This Month</div>
+                    <div className="text-2xl font-bold text-red-700 dark:text-red-300 mt-1">{stats.unpaid}</div>
+                </div>
+                <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4">
+                    <div className="text-sm text-yellow-600 dark:text-yellow-400">No Due Date</div>
+                    <div className="text-2xl font-bold text-yellow-700 dark:text-yellow-300 mt-1">{stats.unknown}</div>
+                </div>
+            </div>
+
+            {/* Filters */}
+            <div className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
+                <div className="flex flex-col md:flex-row gap-4">
+                    <div className="flex-1">
+                        <input
+                            type="text"
+                            placeholder="Search by username, profile, or comment..."
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            className="w-full px-4 py-2 border border-slate-300 dark:border-slate-600 rounded-md bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+                    </div>
+                    <div className="flex gap-2 flex-wrap">
+                        <button
+                            onClick={() => setFilter('all')}
+                            className={`px-4 py-2 rounded-md font-medium transition-colors ${
+                                filter === 'all'
+                                    ? 'bg-blue-600 text-white'
+                                    : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'
+                            }`}
+                        >
+                            All ({stats.total})
+                        </button>
+                        <button
+                            onClick={() => setFilter('paid')}
+                            className={`px-4 py-2 rounded-md font-medium transition-colors ${
+                                filter === 'paid'
+                                    ? 'bg-green-600 text-white'
+                                    : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'
+                            }`}
+                        >
+                            Paid ({stats.paid})
+                        </button>
+                        <button
+                            onClick={() => setFilter('unpaid')}
+                            className={`px-4 py-2 rounded-md font-medium transition-colors ${
+                                filter === 'unpaid'
+                                    ? 'bg-red-600 text-white'
+                                    : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'
+                            }`}
+                        >
+                            Unpaid ({stats.unpaid})
+                        </button>
+                        <button
+                            onClick={exportToCSV}
+                            disabled={isExporting || filteredSecrets.length === 0}
+                            className="px-4 py-2 rounded-md font-medium transition-colors bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                        >
+                            {isExporting ? (
+                                <>
+                                    <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    Exporting...
+                                </>
+                            ) : (
+                                <>
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                    </svg>
+                                    Export CSV
+                                </>
+                            )}
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            {/* Users Table */}
+            <div className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden">
+                <div className="overflow-x-auto">
+                    <table className="w-full">
+                        <thead className="bg-slate-50 dark:bg-slate-900/50 border-b border-slate-200 dark:border-slate-700">
+                            <tr>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Username</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Profile</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Due Date</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Status</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Days Left</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
+                            {filteredSecrets.length === 0 ? (
+                                <tr>
+                                    <td colSpan={6} className="px-6 py-8 text-center text-slate-500 dark:text-slate-400">
+                                        No users found
+                                    </td>
+                                </tr>
+                            ) : (
+                                filteredSecrets.map((secret) => {
+                                    const paymentInfo = getCurrentMonthPayment(secret);
+                                    const status = getPaymentStatus(secret);
+                                    
+                                    return (
+                                        <tr key={secret.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors">
+                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                <div className="text-sm font-medium text-slate-900 dark:text-slate-100">{secret.name}</div>
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                <div className="text-sm text-slate-600 dark:text-slate-400">{secret.profile}</div>
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                <div className="text-sm text-slate-600 dark:text-slate-400">
+                                                    {paymentInfo?.dueDate ? paymentInfo.dueDate.toLocaleDateString() : 'N/A'}
+                                                </div>
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
+                                                    status === 'paid'
+                                                        ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
+                                                        : status === 'unpaid'
+                                                        ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
+                                                        : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400'
+                                                }`}>
+                                                    {status === 'paid' ? 'Paid' : status === 'unpaid' ? 'Unpaid' : 'Unknown'}
+                                                </span>
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                <div className={`text-sm font-medium ${
+                                                    paymentInfo?.isExpired
+                                                        ? 'text-red-600 dark:text-red-400'
+                                                        : paymentInfo && paymentInfo.daysRemaining <= 5
+                                                        ? 'text-orange-600 dark:text-orange-400'
+                                                        : 'text-slate-600 dark:text-slate-400'
+                                                }`}>
+                                                    {paymentInfo ? (
+                                                        paymentInfo.isExpired
+                                                            ? `Expired ${Math.abs(paymentInfo.daysRemaining)} days ago`
+                                                            : `${paymentInfo.daysRemaining} days`
+                                                    ) : 'N/A'}
+                                                </div>
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                                <button
+                                                    onClick={() => {
+                                                        // You can add payment processing here
+                                                        console.log('Process payment for:', secret.name);
+                                                    }}
+                                                    className="text-blue-600 hover:text-blue-900 dark:text-blue-400 dark:hover:text-blue-300 mr-3"
+                                                >
+                                                    Process Payment
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+// --- Main Container Component ---
+type PppoeTab = 'users' | 'active_users' | 'offline_users' | 'profiles' | 'servers' | 'payment_monitoring';
+
+export const Pppoe: React.FC<{ 
+    selectedRouter: RouterConfigWithId | null;
+    addSale: (saleData: Omit<SaleRecord, 'id'>) => Promise<void>;
+}> = ({ selectedRouter, addSale }) => {
+    const { t } = useLocalization();
+    const [activeTab, setActiveTab] = useState<PppoeTab>('users');
+    
+    if (!selectedRouter) {
+        return (
+            <div className="flex flex-col items-center justify-center h-96 text-center bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700">
+                <RouterIcon className="w-16 h-16 text-slate-400 dark:text-slate-600 mb-4" />
+                <h2 className="text-2xl font-bold text-slate-800 dark:text-slate-200">PPPoE Management</h2>
+                <p className="mt-2 text-slate-500 dark:text-slate-400">Please select a router to manage PPPoE.</p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="space-y-8">
+            <div className="border-b border-slate-200 dark:border-slate-700">
+                <nav className="flex space-x-2 overflow-x-auto pb-1" aria-label="Tabs">
+                    <TabButton label={t('pppoe.users')} icon={<UsersIcon className="w-5 h-5" />} isActive={activeTab === 'users'} onClick={() => setActiveTab('users')} />
+                    <TabButton label={t('pppoe.active_users')} icon={<UsersIcon className="w-5 h-5" />} isActive={activeTab === 'active_users'} onClick={() => setActiveTab('active_users')} />
+                    <TabButton label="Offline Users" icon={<ExclamationTriangleIcon className="w-5 h-5" />} isActive={activeTab === 'offline_users'} onClick={() => setActiveTab('offline_users')} />
+                    <TabButton label={t('pppoe.profiles')} icon={<SignalIcon className="w-5 h-5" />} isActive={activeTab === 'profiles'} onClick={() => setActiveTab('profiles')} />
+                    <TabButton label={t('pppoe.servers')} icon={<ServerIcon className="w-5 h-5" />} isActive={activeTab === 'servers'} onClick={() => setActiveTab('servers')} />
+                    <TabButton label="Payment Monitoring" icon={<CurrencyDollarIcon className="w-5 h-5" />} isActive={activeTab === 'payment_monitoring'} onClick={() => setActiveTab('payment_monitoring')} />
+                </nav>
+            </div>
+
+            {activeTab === 'users' && <UsersManager selectedRouter={selectedRouter} addSale={addSale} />}
+            {activeTab === 'active_users' && <ActiveUsersManager selectedRouter={selectedRouter} />}
+            {activeTab === 'offline_users' && <OfflineUsersManager selectedRouter={selectedRouter} />}
+            {activeTab === 'profiles' && <ProfilesManager selectedRouter={selectedRouter} />}
+            {activeTab === 'servers' && <ServersManager selectedRouter={selectedRouter} />}
+            {activeTab === 'payment_monitoring' && <PaymentMonitoring selectedRouter={selectedRouter} addSale={addSale} />}
+        </div>
+    );
+};

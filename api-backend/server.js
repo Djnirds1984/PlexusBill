@@ -1,0 +1,2755 @@
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+
+const express = require('express');
+const cors = require('cors');
+const { RouterOSAPI } = require('node-routeros-v2');
+const axios = require('axios');
+const https = require('https');
+const crypto = require('crypto');
+const PDFDocument = require('pdfkit');
+let sqlite3;
+let open;
+const { WebSocketServer } = require('ws');
+const { Client: SSHClient } = require('ssh2');
+const bcrypt = require('bcryptjs');
+
+const app = express();
+const PORT = 3002;
+
+app.use(cors());
+app.use(express.json());
+
+// Global timeout middleware to prevent 504 Gateway Timeout from Nginx
+app.use((req, res, next) => {
+    // Set default timeout for all routes (30 seconds)
+    req.setTimeout(30000, () => {
+        console.warn(`[Timeout] Request timed out: ${req.method} ${req.originalUrl}`);
+        if (!res.headersSent) {
+            res.status(504).json({ 
+                message: 'Router API request timed out. The MikroTik device may be unreachable or slow to respond.',
+                code: 'ROUTER_TIMEOUT'
+            });
+        }
+    });
+    res.setTimeout(30000, () => {
+        console.warn(`[Timeout] Response timed out: ${req.method} ${req.originalUrl}`);
+        if (!res.headersSent) {
+            res.status(504).json({ 
+                message: 'Router API request timed out. The MikroTik device may be unreachable or slow to respond.',
+                code: 'ROUTER_TIMEOUT'
+            });
+        }
+    });
+    next();
+});
+
+// Database setup - pointing to the proxy's DB
+const DB_PATH = path.resolve(__dirname, '../proxy/panel.db');
+
+let db;
+async function getDb() {
+    if (!db) {
+        if (!sqlite3 || !open) {
+            try {
+                sqlite3 = require('sqlite3');
+                ({ open } = require('sqlite'));
+            } catch (e) {
+                console.warn('[Backend] SQLite modules unavailable:', e.message);
+                throw new Error('Database module unavailable');
+            }
+        }
+        console.log(`[Backend] Connecting to DB at: ${DB_PATH}`);
+        db = await open({
+            filename: DB_PATH,
+            driver: sqlite3.Database
+        });
+        
+        // Enable WAL mode for concurrency
+        await db.exec('PRAGMA journal_mode = WAL;');
+        
+        // Resilience: Ensure routers table exists and migrate schema
+        await db.exec(`
+            CREATE TABLE IF NOT EXISTS routers (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                host TEXT,
+                user TEXT,
+                password TEXT,
+                port INTEGER,
+                api_type TEXT
+            );
+            CREATE TABLE IF NOT EXISTS ppp_grace (
+                router_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                activated_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                original_profile TEXT,
+                original_plan_type TEXT,
+                non_payment_profile TEXT,
+                metadata TEXT,
+                PRIMARY KEY (router_id, name)
+            );
+            CREATE TABLE IF NOT EXISTS client_users (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                router_id TEXT,
+                pppoe_username TEXT,
+                created_at TEXT
+            );
+        `);
+        try {
+            const cols = await db.all("PRAGMA table_info(ppp_grace)");
+            const names = cols.map(c => c.name);
+            if (!names.includes('non_payment_profile')) {
+                await db.exec("ALTER TABLE ppp_grace ADD COLUMN non_payment_profile TEXT");
+            }
+            if (!names.includes('original_plan_type')) {
+                await db.exec("ALTER TABLE ppp_grace ADD COLUMN original_plan_type TEXT");
+            }
+            if (!names.includes('metadata')) {
+                await db.exec("ALTER TABLE ppp_grace ADD COLUMN metadata TEXT");
+            }
+        } catch (mErr) {
+            console.warn('[DB Migration] ppp_grace migration warning:', mErr.message);
+        }
+    }
+    return db;
+}
+
+// Helper to create router instance based on config
+const createRouterInstance = (config) => {
+    if (!config || !config.host || !config.user) {
+        throw new Error('Invalid router configuration');
+    }
+    
+    if (config.api_type === 'legacy') {
+        const isTls = config.port === 8729;
+        return new RouterOSAPI({
+            host: config.host,
+            user: config.user,
+            password: config.password || '',
+            port: config.port || 8728,
+            timeout: 15,
+            tls: isTls,
+            tlsOptions: isTls ? { rejectUnauthorized: false, minVersion: 'TLSv1.2' } : undefined,
+        });
+    }
+
+    const protocol = config.port === 443 ? 'https' : 'http';
+    const baseURL = `${protocol}://${config.host}:${config.port}/rest`;
+    const auth = { username: config.user, password: config.password || '' };
+
+    const instance = axios.create({ 
+        baseURL, 
+        auth,
+        httpsAgent: new https.Agent({ rejectUnauthorized: false, minVersion: 'TLSv1.2' }),
+        timeout: 15000,
+        headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        },
+        validateStatus: (status) => status >= 200 && status < 300
+    });
+
+    // Normalize ID fields
+    instance.interceptors.response.use(response => {
+        const mapId = (item) => {
+            if (item && typeof item === 'object' && '.id' in item) {
+                return { ...item, id: item['.id'] };
+            }
+            return item;
+        };
+
+        if (response.data && typeof response.data === 'object') {
+            if (Array.isArray(response.data)) {
+                response.data = response.data.map(mapId);
+            } else {
+                response.data = mapId(response.data);
+            }
+        }
+        return response;
+    }, error => Promise.reject(error));
+
+    return instance;
+};
+
+// Middleware to attach router config based on ID
+const getRouter = async (req, res, next) => {
+    try {
+        const routerId = req.params.routerId;
+        if (!routerId) return res.status(400).json({ message: 'Router ID missing' });
+        
+        const database = await getDb();
+        const router = await database.get('SELECT * FROM routers WHERE id = ?', [routerId]);
+        if (!router) {
+            console.warn(`[Backend] Router ID ${routerId} not found in DB.`);
+            return res.status(404).json({ message: 'Router not found' });
+        }
+        
+        req.router = router;
+        req.routerInstance = createRouterInstance(router);
+        next();
+    } catch (e) {
+        console.error("DB Error in getRouter:", e);
+        res.status(500).json({ message: 'Internal Server Error' });
+    }
+};
+
+// Helper for Legacy Writes
+const writeLegacySafe = async (client, query) => {
+    try {
+        return await client.write(query);
+    } catch (error) {
+        // Suppress "empty response" errors which are common in node-routeros-v2 for empty lists
+        if (error.errno === 'UNKNOWNREPLY' && error.message.includes('!empty')) {
+            return [];
+        }
+        throw error;
+    }
+};
+
+const normalizeLegacyObject = (obj) => {
+     if (!obj || typeof obj !== 'object') return obj;
+    const newObj = {};
+    for (const key in obj) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) {
+            newObj[key.replace(/_/g, '-')] = obj[key];
+        }
+    }
+    if (newObj['.id']) newObj.id = newObj['.id'];
+    return newObj;
+}
+
+const maskSensitive = (obj) => {
+    try {
+        if (!obj || typeof obj !== 'object') return obj;
+        const copy = JSON.parse(JSON.stringify(obj));
+        const mask = (o) => {
+            if (!o || typeof o !== 'object') return;
+            for (const k of Object.keys(o)) {
+                if (k.toLowerCase().includes('password')) o[k] = '***';
+                else if (typeof o[k] === 'object') mask(o[k]);
+            }
+        };
+        mask(copy);
+        return copy;
+    } catch (_) { return obj; }
+};
+const safeStringify = (obj) => { try { return JSON.stringify(obj); } catch (_) { return '[unserializable]'; } };
+
+// --- SPECIAL ENDPOINTS (must come before the generic proxy) ---
+
+// 0. Test Connection (does not use getRouter middleware as router isn't saved yet)
+app.post('/test/test-connection', async (req, res) => {
+    const config = req.body;
+    try {
+        if (!config || !config.host || !config.user || !config.api_type) {
+            return res.status(400).json({ success: false, message: 'Incomplete router configuration provided for testing.' });
+        }
+
+        const client = createRouterInstance(config);
+        
+        if (config.api_type === 'legacy') {
+            await client.connect();
+            // A quick command to verify we can interact
+            await writeLegacySafe(client, ['/system/resource/print']);
+            await client.close();
+        } else {
+            // For REST, a simple GET request is enough to test connection and auth
+            await client.get('/system/resource');
+        }
+        res.json({ success: true, message: 'Connection successful!' });
+    } catch (e) {
+        console.error("Test Connection Error:", e.message);
+        const status = e.response ? e.response.status : 500;
+        const msg = e.response?.data?.message || e.response?.data?.detail || e.message;
+        const baseURL = (() => {
+            try {
+                const inst = createRouterInstance(req.body);
+                return inst?.defaults?.baseURL || null;
+            } catch (_) { return null; }
+        })();
+        res.status(status).json({ success: false, message: `Connection failed: ${msg}`, baseURL, status });
+    }
+});
+
+// --- NTC COMPLIANCE ENDPOINTS (MUST BE BEFORE /:routerId ROUTES) ---
+
+// Helper: Check MikroTik services (Telnet, FTP, WinBox)
+const checkMikrotikServices = async (routerConfig) => {
+  try {
+    const client = createRouterInstance(routerConfig);
+    
+    let services;
+    if (routerConfig.api_type === 'legacy') {
+      // Legacy API uses .write()
+      await client.connect();
+      try {
+        services = await client.write('/ip/service/print');
+      } finally {
+        await client.close();
+      }
+    } else {
+      // REST API uses axios get
+      const response = await client.get('/ip/service');
+      services = response.data;
+    }
+    
+    // Defensive: ensure services is an array
+    if (!Array.isArray(services)) {
+      console.error('[NTC] Services response is not an array:', typeof services);
+      services = [];
+    }
+    
+    const telnet = services.find(s => s.name === 'telnet');
+    const ftp = services.find(s => s.name === 'ftp');
+    const winbox = services.find(s => s.name === 'winbox');
+    
+    // Check telnet disabled status
+    const telnetDisabled = telnet?.disabled === 'true';
+    
+    // Check ftp disabled status
+    const ftpDisabled = ftp?.disabled === 'true';
+    
+    // Check winbox secure (custom port, not default 8291)
+    const winboxPort = winbox?.port || '8291';
+    const winboxSecure = winboxPort !== '8291';
+    
+    return {
+      telnetDisabled,
+      ftpDisabled,
+      winboxSecure,
+      telnet: telnetDisabled ? 'DISABLED' : 'ENABLED',
+      ftp: ftpDisabled ? 'DISABLED' : 'ENABLED',
+      winbox: winboxSecure ? 'SECURE' : 'DEFAULT_PORT',
+      status: (telnetDisabled && ftpDisabled && winboxSecure) 
+        ? 'COMPLIANT' 
+        : 'WARNING'
+    };
+  } catch (err) {
+    console.error('[NTC] Service check failed:', err.message);
+    return {
+      telnetDisabled: false,
+      ftpDisabled: false,
+      winboxSecure: false,
+      telnet: 'ERROR',
+      ftp: 'ERROR',
+      winbox: 'ERROR',
+      status: 'WARNING'
+    };
+  }
+};
+
+// Helper: Check PPPoE profile isolation
+const checkPPPoEIsolation = async (routerConfig) => {
+  try {
+    const client = createRouterInstance(routerConfig);
+    
+    let profiles;
+    let firewallRules;
+    
+    if (routerConfig.api_type === 'legacy') {
+      // Legacy API uses .write()
+      await client.connect();
+      try {
+        profiles = await client.write('/ppp/profile/print');
+        firewallRules = await client.write('/ip/firewall/filter/print');
+      } finally {
+        await client.close();
+      }
+    } else {
+      // REST API uses axios get
+      const [profilesRes, firewallRes] = await Promise.all([
+        client.get('/ppp/profile'),
+        client.get('/ip/firewall/filter')
+      ]);
+      profiles = profilesRes.data;
+      firewallRules = firewallRes.data;
+    }
+    
+    // Defensive: ensure responses are arrays
+    if (!Array.isArray(profiles)) {
+      console.error('[NTC] Profiles response is not an array:', typeof profiles);
+      profiles = [];
+    }
+    if (!Array.isArray(firewallRules)) {
+      console.error('[NTC] Firewall rules response is not an array:', typeof firewallRules);
+      firewallRules = [];
+    }
+    
+    const profilesCount = profiles.length;
+    
+    // Look for active forward chain rules that drop client-to-client traffic
+    // Specifically checks for PPPoE network isolation on 172.15.0.0/24
+    let hasIsolationRule = false;
+    
+    for (const rule of firewallRules) {
+      // Check if rule is active (not disabled)
+      if (rule.disabled === 'true') continue;
+      
+      // Check if it's a drop action rule
+      const isDropAction = rule.action === 'drop';
+      
+      if (!isDropAction) continue;
+      
+      // Check for exact 172.15.0.0/24 subnet isolation
+      // Both src-address and dst-address must match the PPPoE network
+      const srcAddr = rule['src-address'] || '';
+      const dstAddr = rule['dst-address'] || '';
+      
+      // String-match BOTH addresses to exactly equal 172.15.0.0/24
+      if (srcAddr === '172.15.0.0/24' && dstAddr === '172.15.0.0/24') {
+        hasIsolationRule = true;
+        console.log('[NTC] Found PPPoE isolation rule: drop 172.15.0.0/24 -> 172.15.0.0/24');
+        break;
+      }
+    }
+    
+    return {
+      profilesCount,
+      isolated: hasIsolationRule,
+      status: hasIsolationRule ? 'COMPLIANT' : 'WARNING'
+    };
+  } catch (err) {
+    console.error('[NTC] PPPoE isolation check failed:', err.message);
+    return { profilesCount: 0, isolated: false, status: 'WARNING' };
+  }
+};
+
+// Helper: Check Cloudflare Tunnel status
+const checkCloudflareTunnel = () => {
+  // Check multiple possible env variable names
+  const usingCloudflare = 
+    process.env.USING_CLOUDFLARE_TUNNEL === 'true' || 
+    process.env.USING_CLOUDFLARE_TUNNEL === '1' ||
+    process.env.CLOUDFLARE_TUNNEL === 'true' ||
+    process.env.CLOUDFLARE === 'true';
+  
+  console.log('[NTC] Cloudflare check:', {
+    USING_CLOUDFLARE_TUNNEL: process.env.USING_CLOUDFLARE_TUNNEL,
+    CLOUDFLARE_TUNNEL: process.env.CLOUDFLARE_TUNNEL,
+    usingCloudflare
+  });
+  
+  // Default to TLS 1.3 when using Cloudflare proxy edge
+  const tlsVersion = process.env.TLS_VERSION || (usingCloudflare ? '1.3' : 'unknown');
+  
+  return {
+    cloudflareTunnel: usingCloudflare ? 'Active' : 'Inactive',
+    tunnelActive: usingCloudflare,
+    tlsVersion,
+    status: usingCloudflare ? 'COMPLIANT' : 'WARNING'
+  };
+};
+
+// Helper: Check PSID cryptography layer
+const checkPSIDCryptography = async () => {
+  try {
+    // PSID is natively encrypted by Facebook's infrastructure
+    const psidEncrypted = true;
+    
+    // Check if Facebook bot is configured via environment variables or database
+    let facebookBotConfigured = false;
+    
+    // Check environment variables first
+    const hasEnvConfig = !!(process.env.FACEBOOK_PAGE_ACCESS_TOKEN && process.env.FACEBOOK_PAGE_ID);
+    
+    if (hasEnvConfig) {
+      facebookBotConfigured = true;
+    } else {
+      // Fallback to database check - settings table uses JSON column
+      const database = await getDb();
+      const settings = await database.get('SELECT facebookSettings FROM settings WHERE id = 1');
+      
+      // Parse JSON settings
+      let fbSettings = {};
+      try {
+        fbSettings = settings?.facebookSettings ? JSON.parse(settings.facebookSettings) : {};
+      } catch (e) {
+        // Ignore parse errors
+      }
+      
+      // Check if Facebook bot is configured
+      facebookBotConfigured = !!(
+        fbSettings?.pageAccessToken && fbSettings?.pageId
+      );
+    }
+    
+    return {
+      psidEncrypted,
+      facebookBotConfigured,
+      botConfigured: facebookBotConfigured, // Keep legacy field name for compatibility
+      status: facebookBotConfigured ? 'COMPLIANT' : 'WARNING'
+    };
+  } catch (err) {
+    console.error('[NTC] PSID check failed:', err.message);
+    return { psidEncrypted: true, facebookBotConfigured: false, botConfigured: false, status: 'WARNING' };
+  }
+};
+
+// Reusable function for compliance check
+const runComplianceCheck = async () => {
+  console.log('[NTC] Starting compliance check...');
+  
+  const database = await getDb();
+  const routers = await database.all('SELECT * FROM routers');
+  
+  // ====== DYNAMIC VARIABLE RETRIEVAL: Fetch active organization name ======
+  const settings = await database.get('SELECT companyName FROM settings WHERE id = 1');
+  const operatorName = settings?.companyName || 'Network Operator';
+  
+  const results = {
+    controlPlane: { routers: [], overallStatus: 'COMPLIANT' },
+    networkIsolation: { routers: [], overallStatus: 'COMPLIANT' },
+    encryption: checkCloudflareTunnel(),
+    dataPrivacy: await checkPSIDCryptography()
+  };
+  
+  const warnings = [];
+  
+  for (const router of routers) {
+    const services = await checkMikrotikServices(router);
+    results.controlPlane.routers.push({ 
+      name: router.name, 
+      telnetDisabled: services.telnetDisabled,
+      ftpDisabled: services.ftpDisabled,
+      winboxSecure: services.winboxSecure,
+      telnet: services.telnet, 
+      ftp: services.ftp, 
+      winbox: services.winbox 
+    });
+    
+    if (services.status === 'WARNING') {
+      results.controlPlane.overallStatus = 'WARNING';
+      const warningParts = [];
+      if (!services.telnetDisabled) warningParts.push('Telnet enabled');
+      if (!services.ftpDisabled) warningParts.push('FTP enabled');
+      if (!services.winboxSecure) warningParts.push('WinBox default port');
+      warnings.push(`${router.name}: ${warningParts.join(', ')}`);
+    }
+    
+    const isolation = await checkPPPoEIsolation(router);
+    results.networkIsolation.routers.push({ 
+      name: router.name, 
+      profilesCount: isolation.profilesCount,
+      isolated: isolation.isolated 
+    });
+    
+    if (isolation.status === 'WARNING') {
+      results.networkIsolation.overallStatus = 'WARNING';
+      warnings.push(`${router.name}: PPPoE client-to-client isolation not detected`);
+    }
+  }
+  
+  // Check encryption status
+  if (results.encryption.status === 'WARNING') {
+    warnings.push('Cloudflare Tunnel not active or TLS version unknown');
+  }
+  
+  // Check data privacy status
+  if (results.dataPrivacy.status === 'WARNING') {
+    warnings.push('Facebook Messenger bot not configured');
+  }
+  
+  // Determine overall status
+  const allCompliant = (
+    results.controlPlane.overallStatus === 'COMPLIANT' &&
+    results.networkIsolation.overallStatus === 'COMPLIANT' &&
+    results.encryption.status === 'COMPLIANT' &&
+    results.dataPrivacy.status === 'COMPLIANT'
+  );
+  
+  const overallStatus = allCompliant ? 'PASSED' : 'WARNING';
+  
+  // Clear warnings if all compliant
+  const finalWarnings = allCompliant ? [] : warnings;
+  
+  return {
+    timestamp: new Date().toISOString(),
+    generatedAtManila: new Date().toLocaleString('en-PH', { timeZone: 'Asia/Manila' }),
+    systemEngineId: crypto.randomUUID(),
+    operator: operatorName, // Dynamic operator name from settings
+    totalRoutersChecked: routers.length,
+    compliance: results,
+    overallStatus,
+    warnings: finalWarnings
+  };
+};
+
+// NTC Compliance Check Endpoint
+app.get('/api/admin/ntc-compliance-check', async (req, res) => {
+  try {
+    const complianceReport = await runComplianceCheck();
+    console.log('[NTC] Compliance check complete:', complianceReport.overallStatus);
+    res.json(complianceReport);
+  } catch (err) {
+    console.error('[NTC] Compliance check error:', err);
+    res.status(500).json({ 
+      message: 'Compliance check failed', 
+      error: err.message 
+    });
+  }
+});
+
+// PDF Report Download Endpoint
+app.get('/api/admin/ntc-report/download', async (req, res) => {
+  try {
+    const complianceData = await runComplianceCheck();
+    
+    // Extract dynamic operator name from compliance data for use in PDF footer
+    const operatorName = complianceData.operator || 'Network Operator';
+    
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename=NTC_Compliance_Report.pdf');
+    
+    const doc = new PDFDocument({ 
+      size: 'A4', 
+      margin: 50,
+      autoFirstPage: true,
+      bufferPages: true // Enable page buffering for better control
+    });
+    
+    doc.pipe(res);
+    
+    const pageWidth = doc.page.width - 100; // Account for margins
+    const pageHeight = doc.page.height - 100; // Account for margins
+    const startX = 50;
+    const MIN_SPACE_FOR_CLOSING = 220; // Minimum pixels needed for warnings + status + signatures
+    
+    // ==========================================
+    // 1. EXECUTIVE HEADER BLOCK
+    // ==========================================
+    doc.rect(startX, doc.y, pageWidth, 60).fill('#1e3a8a');
+    doc.fillColor('white').fontSize(20).font('Helvetica-Bold');
+    doc.text('CYBERSECURITY COMPLIANCE & AUDIT REPORT', startX + 10, doc.y + 12, { width: pageWidth - 20, align: 'center' });
+    
+    // Accent border line
+    doc.moveDown(0.3);
+    doc.rect(startX, doc.y, pageWidth, 3).fill('#f59e0b');
+    doc.moveDown(0.5);
+    
+    // Subtitle
+    doc.fontSize(10).font('Helvetica').fillColor('#64748b');
+    doc.text('Issued under Republic Act No. 12234 (Konektadong Pinoy Act Framework)', { align: 'center' });
+    doc.moveDown(1);
+    
+    // ==========================================
+    // 2. METADATA BOXED SUB-TABLE CONTAINER
+    // ==========================================
+    const metadataY = doc.y;
+    doc.rect(startX, metadataY, pageWidth, 80).fill('#f8fafc').stroke('#cbd5e1');
+    doc.strokeOpacity(1);
+    
+    // Draw metadata box border
+    doc.rect(startX, metadataY, pageWidth, 80).lineWidth(1.5).stroke('#cbd5e1');
+    
+    doc.fillColor('#1e293b').fontSize(11).font('Helvetica-Bold');
+    doc.text('Report Metadata', startX + 15, metadataY + 10);
+    
+    // Metadata fields in two columns
+    const col1X = startX + 15;
+    const col2X = startX + pageWidth / 2 + 10;
+    const fieldY = metadataY + 30;
+    
+    doc.fontSize(9).font('Helvetica');
+    
+    // Left column
+    doc.fillColor('#64748b').text('Operator Name:', col1X, fieldY);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(complianceData.operator, col1X + 100, fieldY);
+    
+    doc.fillColor('#64748b').font('Helvetica').text('Assessment Date:', col1X, fieldY + 20);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(complianceData.generatedAtManila, col1X + 100, fieldY + 20);
+    
+    // Right column
+    doc.fillColor('#64748b').font('Helvetica').text('Node Core Target:', col2X, fieldY);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(`${complianceData.totalRoutersChecked} Router(s)`, col2X + 105, fieldY);
+    
+    doc.fillColor('#64748b').font('Helvetica').text('Engine Version:', col2X, fieldY + 20);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text('v2.4.1-stable', col2X + 105, fieldY + 20);
+    
+    doc.moveDown(2.5);
+    
+    // ==========================================
+    // 3. CORE AUDIT VECTORS TABLE
+    // ==========================================
+    doc.fontSize(13).font('Helvetica-Bold').fillColor('#1e293b');
+    doc.text('Core Audit Vectors Assessment', startX, doc.y);
+    doc.moveDown(0.3);
+    
+    const tableStartY = doc.y;
+    const tableWidth = pageWidth;
+    const colWidths = {
+      vector: tableWidth * 0.45,      // 45%
+      details: tableWidth * 0.35,     // 35%
+      status: tableWidth * 0.20       // 20%
+    };
+    
+    const colX = {
+      vector: startX,
+      details: startX + colWidths.vector,
+      status: startX + colWidths.vector + colWidths.details
+    };
+    
+    const rowHeight = 25;
+    
+    // Table header
+    doc.rect(colX.vector, tableStartY, tableWidth, rowHeight).fill('#1e3a8a');
+    doc.fillColor('white').fontSize(10).font('Helvetica-Bold');
+    doc.text('Vector Section', colX.vector + 8, tableStartY + 7, { width: colWidths.vector - 16 });
+    doc.text('Details', colX.details + 8, tableStartY + 7, { width: colWidths.details - 16 });
+    doc.text('Status', colX.status + 8, tableStartY + 7, { width: colWidths.status - 16 });
+    
+    let currentY = tableStartY + rowHeight;
+    
+    const auditItems = [
+      { 
+        vector: 'Control Plane Hardening', 
+        status: complianceData.compliance.controlPlane.overallStatus, 
+        details: `${complianceData.compliance.controlPlane.routers.length} router(s) inspected` 
+      },
+      { 
+        vector: 'Network Isolation (PPPoE)', 
+        status: complianceData.compliance.networkIsolation.overallStatus, 
+        details: `${complianceData.compliance.networkIsolation.routers.length} profile(s) verified` 
+      },
+      { 
+        vector: 'Encryption Matrix (TLS 1.3)', 
+        status: complianceData.compliance.encryption.status, 
+        details: complianceData.compliance.encryption.tunnelActive ? 'Cloudflare Tunnel Active' : 'Not Configured' 
+      },
+      { 
+        vector: 'Data Privacy (PSID Crypto)', 
+        status: complianceData.compliance.dataPrivacy.status, 
+        details: complianceData.compliance.dataPrivacy.botConfigured ? 'Facebook Bot Secured' : 'Not Configured' 
+      }
+    ];
+    
+    auditItems.forEach((row, idx) => {
+      const isEven = idx % 2 === 0;
+      
+      // Check if we need a new page before drawing this row
+      if (currentY + rowHeight > pageHeight - MIN_SPACE_FOR_CLOSING) {
+        doc.addPage();
+        currentY = 50; // Reset to top margin
+        
+        // Redraw table header on new page
+        doc.rect(colX.vector, currentY, tableWidth, rowHeight).fill('#1e3a8a');
+        doc.fillColor('white').fontSize(10).font('Helvetica-Bold');
+        doc.text('Vector Section', colX.vector + 8, currentY + 7, { width: colWidths.vector - 16 });
+        doc.text('Details', colX.details + 8, currentY + 7, { width: colWidths.details - 16 });
+        doc.text('Status', colX.status + 8, currentY + 7, { width: colWidths.status - 16 });
+        currentY += rowHeight;
+      }
+      
+      // Row background
+      doc.rect(colX.vector, currentY, tableWidth, rowHeight).fill(isEven ? '#f8fafc' : '#ffffff');
+      
+      // Row border
+      doc.rect(colX.vector, currentY, tableWidth, rowHeight).lineWidth(0.5).stroke('#e2e8f0');
+      
+      // Vector section
+      doc.fillColor('#0f172a').fontSize(9).font('Helvetica');
+      doc.text(row.vector, colX.vector + 8, currentY + 7, { width: colWidths.vector - 16 });
+      
+      // Details
+      doc.fillColor('#475569').fontSize(9).font('Helvetica');
+      doc.text(row.details, colX.details + 8, currentY + 7, { width: colWidths.details - 16 });
+      
+      // Status badge with color-coding
+      const statusText = row.status;
+      const badgeX = colX.status + 8;
+      const badgeY = currentY + 5;
+      const badgeWidth = colWidths.status - 16;
+      const badgeHeight = 15;
+      
+      if (statusText === 'COMPLIANT') {
+        // Light green background with dark forest green text
+        doc.rect(badgeX, badgeY, badgeWidth, badgeHeight).fill('#dcfce7');
+        doc.fillColor('#166534').fontSize(9).font('Helvetica-Bold');
+        doc.text(statusText, badgeX + 3, badgeY + 2, { width: badgeWidth - 6 });
+      } else {
+        // Light amber background with dark gold text
+        doc.rect(badgeX, badgeY, badgeWidth, badgeHeight).fill('#fef3c7');
+        doc.fillColor('#92400e').fontSize(9).font('Helvetica-Bold');
+        doc.text(statusText, badgeX + 3, badgeY + 2, { width: badgeWidth - 6 });
+      }
+      
+      currentY += rowHeight;
+    });
+    
+    doc.y = currentY + 20;
+    
+    // ==========================================
+    // PAGINATION CONTROL: REPORT CLOSING BLOCK
+    // Keep warnings, status, and signatures together
+    // ==========================================
+    const warningBoxHeight = complianceData.warnings.length > 0 
+      ? (30 + (complianceData.warnings.length * 20)) 
+      : 0;
+    
+    const closingBlockHeight = 20 + // spacing before warnings
+      warningBoxHeight + 
+      15 + // spacing after warnings
+      35 + // status badge height
+      25 + // spacing after status
+      80 + // signature block height
+      25 + // confidential footer
+      20;  // buffer
+    
+    // Check if there's enough space for the entire closing block
+    if (doc.y + closingBlockHeight > pageHeight) {
+      // Not enough space - force page break to keep closing block together
+      doc.addPage();
+      doc.y = 50; // Reset to top margin
+    }
+    
+    let closingY = doc.y;
+    
+    // ==========================================
+    // 5. SYSTEM WARNINGS & REQUIRED ACTIONS
+    // ==========================================
+    if (complianceData.warnings.length > 0) {
+      closingY += 15; // spacing before warnings
+      
+      const warningBoxY = closingY;
+      
+      // Warning box background
+      doc.rect(startX, warningBoxY, pageWidth, warningBoxHeight).fill('#fff7ed');
+      doc.rect(startX, warningBoxY, pageWidth, warningBoxHeight).lineWidth(1.5).stroke('#f97316');
+      
+      // Warning header
+      doc.fillColor('#9a3412').fontSize(11).font('Helvetica-Bold');
+      doc.text('System Warnings & Required Actions', startX + 12, warningBoxY + 8);
+      
+      // Warning items
+      doc.fillColor('#7c2d12').fontSize(9).font('Helvetica');
+      complianceData.warnings.forEach((warning, idx) => {
+        const warningY = warningBoxY + 28 + (idx * 18);
+        doc.text(`• ${warning}`, startX + 15, warningY, { width: pageWidth - 30 });
+      });
+      
+      closingY = warningBoxY + warningBoxHeight + 15;
+    }
+    
+    // ==========================================
+    // OVERALL STATUS BADGE
+    // ==========================================
+    const overallStatusText = complianceData.overallStatus;
+    const badgeWidth2 = 180;
+    const badgeHeight2 = 35;
+    const badgeX2 = startX + (pageWidth - badgeWidth2) / 2;
+    
+    if (overallStatusText === 'PASSED' || overallStatusText === 'COMPLIANT') {
+      doc.rect(badgeX2, closingY, badgeWidth2, badgeHeight2).fill('#dcfce7');
+      doc.fillColor('#166534').fontSize(13).font('Helvetica-Bold');
+      doc.text(`OVERALL STATUS: ${overallStatusText}`, badgeX2 + 5, closingY + 10, { width: badgeWidth2 - 10, align: 'center' });
+    } else {
+      doc.rect(badgeX2, closingY, badgeWidth2, badgeHeight2).fill('#fef3c7');
+      doc.fillColor('#92400e').fontSize(13).font('Helvetica-Bold');
+      doc.text(`OVERALL STATUS: ${overallStatusText}`, badgeX2 + 5, closingY + 10, { width: badgeWidth2 - 10, align: 'center' });
+    }
+    
+    closingY += badgeHeight2 + 25;
+    
+    // ==========================================
+    // 6. SIGNATURE FOOTER - HORIZONTAL ALIGNMENT
+    // ==========================================
+    const signatureWidth = pageWidth / 2 - 30;
+    
+    // Left signature block
+    doc.moveTo(startX, closingY + 30).lineTo(startX + signatureWidth, closingY + 30).stroke('#94a3b8');
+    doc.fillColor('#0f172a').fontSize(9).font('Helvetica-Bold');
+    doc.text('Network Administrator / DTIP Operator', startX, closingY + 35, { width: signatureWidth, continued: false });
+    doc.fillColor('#64748b').fontSize(8).font('Helvetica');
+    doc.text(operatorName, startX, closingY + 47, { width: signatureWidth, continued: false });
+    doc.text('Admin Signature', startX, closingY + 57, { width: signatureWidth, continued: false });
+    
+    // Right signature block
+    const rightX = startX + signatureWidth + 60;
+    doc.moveTo(rightX, closingY + 30).lineTo(rightX + signatureWidth, closingY + 30).stroke('#94a3b8');
+    doc.fillColor('#0f172a').fontSize(9).font('Helvetica-Bold');
+    doc.text('Date Verification', rightX, closingY + 35, { width: signatureWidth, continued: false });
+    doc.fillColor('#64748b').fontSize(8).font('Helvetica');
+    doc.text(`Generated: ${complianceData.generatedAtManila}`, rightX, closingY + 47, { width: signatureWidth, continued: false });
+    doc.text('Date: _________________', rightX, closingY + 57, { width: signatureWidth, continued: false });
+    
+    closingY += 80;
+    
+    // ==========================================
+    // CONFIDENTIAL FOOTER
+    // ==========================================
+    doc.rect(startX, closingY, pageWidth, 25).fill('#f1f5f9');
+    doc.fillColor('#64748b').fontSize(7).font('Helvetica');
+    doc.text('This report is automatically generated by the Mikrotik Billing Manager NTC Compliance System.', startX + 10, closingY + 6, { width: pageWidth - 20, align: 'center', continued: false });
+    doc.text('CONFIDENTIAL — For regulatory compliance purposes only.', startX + 10, closingY + 15, { width: pageWidth - 20, align: 'center', continued: false });
+    
+    doc.y = closingY + 30;
+    
+    doc.end();
+    console.log('[NTC] PDF report generated successfully');
+  } catch (err) {
+    console.error('[NTC] PDF generation error:', err);
+    res.status(500).json({ message: 'PDF generation failed', error: err.message });
+  }
+});
+
+// --- END NTC COMPLIANCE ENDPOINTS ---
+
+
+// 1. SPECIAL ENDPOINT: Interface Stats
+// This logic was previously in proxy/server.js but belongs here because Nginx routes /mt-api here.
+app.get('/:routerId/interface/stats', getRouter, async (req, res) => {
+    // Set explicit timeout to prevent 504 from Nginx
+    req.setTimeout(30000);
+    res.setTimeout(30000);
+    
+    try {
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance;
+            await client.connect();
+            try {
+                // For Legacy API, we need specific commands to get stats
+                const result = await writeLegacySafe(client, ['/interface/print', 'stats', 'detail', 'without-paging']);
+                res.json(result.map(normalizeLegacyObject));
+            } finally {
+                await client.close();
+            }
+        } else {
+            // REST API (v7+)
+            const response = await req.routerInstance.post('/interface/print', { 'stats': true, 'detail': true });
+            res.json(response.data);
+        }
+    } catch (e) {
+        console.error("Stats Error:", e.message);
+        res.status(500).json({ message: e.message });
+    }
+});
+
+// 1b. Interfaces List
+app.get('/:routerId/interface/print', getRouter, async (req, res) => {
+    try {
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance;
+            await client.connect();
+            try {
+                const result = await writeLegacySafe(client, ['/interface/print']);
+                res.json(result.map(normalizeLegacyObject));
+            } finally {
+                await client.close();
+            }
+        } else {
+            const response = await req.routerInstance.get('/interface');
+            res.json(response.data);
+        }
+    } catch (e) {
+        console.error("Interface Print Error:", e.message);
+        const status = e.response ? e.response.status : 500;
+        const msg = e.response?.data?.message || e.response?.data?.detail || e.message;
+        res.status(status).json({ message: msg });
+    }
+});
+
+// 2b. System Resource Print
+app.get('/:routerId/system/resource/print', getRouter, async (req, res) => {
+    // Set explicit timeout to prevent 504 from Nginx
+    req.setTimeout(30000);
+    res.setTimeout(30000);
+    
+    try {
+        let resource;
+        let temperature = null;
+
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance;
+            await client.connect();
+            try {
+                const result = await writeLegacySafe(client, ['/system/resource/print']);
+                const normalized = Array.isArray(result) ? result.map(normalizeLegacyObject) : [normalizeLegacyObject(result)];
+                resource = normalized[0] || {};
+                
+                // Try fetching health for temperature
+                try {
+                    const health = await writeLegacySafe(client, ['/system/health/print']);
+                    if (Array.isArray(health) && health.length > 0) {
+                        const h = normalizeLegacyObject(health[0]);
+                        // Usually 'temperature' or 'cpu-temperature'
+                        if (h.temperature) temperature = parseFloat(h.temperature);
+                        else if (h['cpu-temperature']) temperature = parseFloat(h['cpu-temperature']);
+                    }
+                } catch (hErr) {
+                    // Ignore health fetch errors (some routers don't support it)
+                }
+
+            } finally { await client.close(); }
+        } else {
+            const response = await req.routerInstance.get('/system/resource');
+            resource = Array.isArray(response.data) ? response.data[0] : response.data;
+
+            // Try fetching health for temperature
+            try {
+                const hRes = await req.routerInstance.get('/system/health');
+                const h = Array.isArray(hRes.data) ? hRes.data[0] : hRes.data;
+                if (h) {
+                     if (h.temperature) temperature = parseFloat(h.temperature);
+                     else if (h['cpu-temperature']) temperature = parseFloat(h['cpu-temperature']);
+                }
+            } catch (hErr) {
+                // Ignore
+            }
+        }
+        const parseMemory = (memStr) => {
+            if (!memStr || typeof memStr !== 'string') return 0;
+            const value = parseFloat(memStr);
+            const s = memStr.toLowerCase();
+            if (s.includes('kib')) return value * 1024;
+            if (s.includes('mib')) return value * 1024 * 1024;
+            if (s.includes('gib')) return value * 1024 * 1024 * 1024;
+            return value;
+        };
+        const formatBytes = (bytes) => {
+            if (!bytes || bytes <= 0) return '0 B';
+            const k = 1024; const sizes = ['B','KB','MB','GB','TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            const v = parseFloat((bytes / Math.pow(k, i)).toFixed(1));
+            return `${v}${sizes[i]}`;
+        };
+        const totalMemoryBytes = parseMemory(resource['total-memory']);
+        const freeMemoryBytes = parseMemory(resource['free-memory']);
+        const usedMemoryBytes = totalMemoryBytes > 0 ? (totalMemoryBytes - freeMemoryBytes) : 0;
+        const memoryUsage = totalMemoryBytes > 0 ? parseFloat(((usedMemoryBytes / totalMemoryBytes) * 100).toFixed(1)) : 0;
+        
+        const responseData = {
+            boardName: resource['board-name'] || resource['boardName'] || '',
+            version: resource.version || '',
+            cpuLoad: Number(resource['cpu-load'] || resource['cpuLoad'] || 0),
+            uptime: resource.uptime || '',
+            memoryUsage,
+            totalMemory: formatBytes(totalMemoryBytes)
+        };
+        
+        if (temperature !== null && !isNaN(temperature)) {
+            responseData.temperature = temperature;
+        }
+
+        res.json(responseData);
+    } catch (e) {
+        const status = e.response ? e.response.status : 500;
+        const msg = e.response?.data?.message || e.response?.data?.detail || e.message;
+        res.status(status).json({ message: msg });
+    }
+});
+
+// 3. PPP Active Print
+app.get('/:routerId/ppp/active/print', getRouter, async (req, res) => {
+    // Set explicit timeout to prevent 504 from Nginx
+    req.setTimeout(30000);
+    res.setTimeout(30000);
+    
+    try {
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance;
+            await client.connect();
+            try {
+                // Get active connections
+                const active = await writeLegacySafe(client, ['/ppp/active/print']);
+                const activeNormalized = active.map(normalizeLegacyObject);
+
+                // Get interface stats for each active connection
+                // This is N+1 but necessary for accurate real-time speeds per user
+                // To optimize, we could just fetch all interfaces and match by name, 
+                // since PPP active interface names usually match or are predictable.
+                // Let's fetch ALL interfaces first to avoid N round trips if possible.
+                const interfaces = await writeLegacySafe(client, ['/interface/print', '?type=pppoe-in']);
+                const interfacesNormalized = interfaces.map(normalizeLegacyObject);
+
+                const enriched = activeNormalized.map(u => {
+                    // Find matching interface (usually <pppoe-username>)
+                    const iface = interfacesNormalized.find(i => i.name === `<pppoe-${u.name}>`) || 
+                                  interfacesNormalized.find(i => i.name === u.name) ||
+                                  interfacesNormalized.find(i => i.name.includes(u.name));
+                    
+                    // Legacy output for rx-byte/tx-byte is total, not rate. 
+                    // To get RATE (bps), we need /interface/monitor-traffic
+                    // But monitor-traffic is continuous. 
+                    // Best approach for "snapshot" speed:
+                    // We can't easily get instantaneous rate for ALL users in one command in legacy without scripting.
+                    // However, 'interface print' often has 'rx-byte' 'tx-byte' totals.
+                    // Real-time Mbps requires monitoring.
+                    // Fallback: Just return what we have, frontend might need to poll or we implement a specific monitor endpoint.
+                    // Actually, the user asked for "actual traffic speed". 
+                    // For legacy, we might skip heavy monitoring for list views.
+                    // BUT, RouterOS 'interface print detail' sometimes shows rate if monitored? No.
+                    // Let's try to attach interface name at least.
+                    return { ...u, interfaceId: iface ? iface['.id'] : null }; 
+                });
+                
+                // For the purpose of this request, we need to return the list. 
+                // The frontend will likely need to fetch traffic stats separately or we include it here?
+                // Including real-time traffic for ALL users is heavy.
+                // Let's start by just returning the list. The FRONTEND component will likely need to fetch specific stats.
+                // WAIT: The user wants a COLUMN. 
+                // If we want a column in the table, we need the data NOW.
+                // Executing monitor-traffic for all active interfaces is too slow.
+                // Alternative: Use /interface/print stats-detail? No.
+                
+                // Let's try to get ALL interface stats in one go if possible.
+                res.json(activeNormalized);
+            } finally {
+                await client.close();
+            }
+        } else {
+            // Generous timeout: routers with many active sessions can exceed the 15s default.
+            const response = await req.routerInstance.get('/ppp/active', { timeout: 60000 });
+            
+            // For REST, we can also fetch interface stats
+            // Same issue: real-time speed (bits/sec) vs total bytes.
+            // /interface/print usually returns rx-byte/tx-byte (counters).
+            // To get speed, we calculate delta or use monitor-traffic.
+            // Let's just return the active users for now, and handle the "speed" fetching in the frontend 
+            // by querying a new endpoint `ppp/active/stats` or similar to avoid blocking this call.
+            res.json(response.data);
+        }
+    } catch (e) {
+        console.error("PPP Active Error:", e.message);
+        const status = e.response ? e.response.status : 500;
+        const msg = e.response?.data?.message || e.response?.data?.detail || e.message;
+        res.status(status).json({ message: msg });
+    }
+});
+
+// 3c. System Logs (New Endpoint)
+app.get('/:routerId/log/print', getRouter, async (req, res) => {
+    try {
+        const client = req.routerInstance;
+        if (req.router.api_type === 'legacy') {
+            await client.connect();
+            const logs = await writeLegacySafe(client, ['/log/print']);
+            // Keep connection? No, usually close for stateless unless caching.
+            // But writeLegacySafe doesn't close.
+            await client.close();
+            // Normalize to ensure 'id' field exists and keys are consistent
+            res.json(logs.map(normalizeLegacyObject));
+        } else {
+            // REST API: Use /log for the collection, not /log/print
+            const response = await client.get('/log');
+            res.json(response.data);
+        }
+    } catch (e) {
+        console.error("Log Fetch Error:", e.message);
+        if (req.router && req.router.api_type === 'legacy' && req.routerInstance) {
+             try { await req.routerInstance.close(); } catch(_) {}
+        }
+        res.status(500).json({ message: e.message });
+    }
+});
+
+// 3b. PPP Active Traffic Monitor (New Endpoint)
+// Short-lived in-process cache for the per-router interface list, so we don't
+// re-fetch the (potentially huge) /interface table on every traffic poll.
+// Key: routerId, Value: { data: Interface[], expiresAt: number }
+const INTERFACE_CACHE_TTL_MS = 30 * 1000; // 30 seconds
+const interfaceListCache = new Map();
+
+const fetchPppoeInterfaces = async (req) => {
+    const routerId = req.router.id;
+    const cached = interfaceListCache.get(routerId);
+    if (cached && cached.expiresAt > Date.now() && Array.isArray(cached.data) && cached.data.length > 0) {
+        return cached.data;
+    }
+
+    const client = req.routerInstance;
+    let interfaces = [];
+
+    if (req.router.api_type === 'legacy') {
+        try { await client.connect(); } catch (_) {}
+        try {
+            interfaces = await writeLegacySafe(client, ['/interface/print', '?type=pppoe-in']);
+            if (!interfaces || interfaces.length === 0) {
+                interfaces = await writeLegacySafe(client, ['/interface/print', '?dynamic=true']);
+            }
+        } catch (_) {}
+    } else {
+        // REST: use a generous per-request timeout; routers with thousands of dynamic
+        // PPPoE interfaces can take well over 15s to serialize the whole table.
+        const longTimeout = { timeout: 60000 };
+        const tryGet = async (url) => {
+            try {
+                const r = await client.get(url, longTimeout);
+                return Array.isArray(r.data) ? r.data : [];
+            } catch (_) {
+                return [];
+            }
+        };
+        // Prefer the narrowest filter first.
+        interfaces = await tryGet('/interface?type=pppoe-in');
+        if (!interfaces.length) interfaces = await tryGet('/interface?dynamic=true');
+        if (!interfaces.length) interfaces = await tryGet('/interface');
+    }
+
+    if (Array.isArray(interfaces) && interfaces.length > 0) {
+        interfaceListCache.set(routerId, { data: interfaces, expiresAt: Date.now() + INTERFACE_CACHE_TTL_MS });
+    }
+    return interfaces || [];
+};
+
+app.post('/:routerId/ppp/active/traffic', getRouter, async (req, res) => {
+    const { names } = req.body; // Array of ppp active names (usernames)
+    if (!names || !Array.isArray(names) || names.length === 0) return res.json({});
+
+    try {
+        const client = req.routerInstance;
+        
+        // 1. Resolve Interface Names
+        // We need to map PPP User Name -> Actual Interface Name
+        // Standard is <pppoe-username>, but it varies.
+        // Cached lookup so high-frequency polling doesn't re-fetch every time.
+        let interfaces = [];
+        try {
+            interfaces = await fetchPppoeInterfaces(req);
+        } catch (err) {
+            console.warn("Failed to fetch interfaces for mapping:", err.message);
+        }
+
+        const interfaceMap = {}; // username -> { name, id }
+        const validInterfaceKeys = []; // we will prefer .id for REST monitor-traffic
+
+        if (Array.isArray(interfaces)) {
+            names.forEach(uName => {
+                // Try to find the interface
+                // Matches: name === uName OR name === <pppoe-uName> OR name === pppoe-uName
+                // Also check if name contains the username (loose match) for edge cases
+                const match = interfaces.find(i => 
+                    i.name === uName || 
+                    i.name === `<pppoe-${uName}>` || 
+                    i.name === `pppoe-${uName}` ||
+                    (i.name.includes(uName) && i.name.includes('pppoe'))
+                );
+
+                if (match) {
+                    const id = match['.id'] || match.id;
+                    interfaceMap[uName] = { name: match.name, id };
+                    // Prefer .id (e.g. *1A) for dynamic interfaces — display names with
+                    // angle brackets/spaces/commas are rejected by REST monitor-traffic.
+                    validInterfaceKeys.push(id || match.name);
+                }
+            });
+        }
+
+        // Deduplicate
+        const uniqueInterfaces = [...new Set(validInterfaceKeys)];
+        if (uniqueInterfaces.length === 0) {
+             if (req.router.api_type === 'legacy') await client.close();
+             return res.json({});
+        }
+
+        // 2. Monitor Traffic
+        const result = {};
+
+        if (req.router.api_type === 'legacy') {
+            // Legacy monitor-traffic
+            try {
+                // Ensure legacy connection is open (cache hits skip connect()).
+                try { await client.connect(); } catch (_) {}
+                // Legacy API uses real interface names — strip <> for dynamic interfaces.
+                const legacyNames = uniqueInterfaces.map(key => {
+                    // key may be a .id like *1A or a display name; map back to a usable name.
+                    const entry = Object.values(interfaceMap).find(v => v.id === key || v.name === key);
+                    const rawName = entry?.name || key;
+                    return rawName.replace(/^</, '').replace(/>$/, '');
+                });
+                const cmd = ['/interface/monitor-traffic', `=interface=${legacyNames.join(',')}`, '=once'];
+                const stats = await writeLegacySafe(client, cmd);
+                
+                if (Array.isArray(stats)) {
+                    stats.forEach(s => {
+                        // We have stats for interface s.name.
+                        // Find which user(s) map to this interface.
+                        // This is reverse lookup.
+                        Object.entries(interfaceMap).forEach(([u, v]) => {
+                            const stripped = (v.name || '').replace(/^</, '').replace(/>$/, '');
+                            if (v.name === s.name || stripped === s.name) {
+                                result[u] = {
+                                    rx: parseInt(s['rx-bits-per-second'] || 0),
+                                    tx: parseInt(s['tx-bits-per-second'] || 0)
+                                };
+                            }
+                        });
+                    });
+                }
+            } finally {
+                await client.close();
+            }
+        } else {
+            // REST: monitor-traffic per interface (some RouterOS REST versions reject
+            // comma-separated lists or string 'true' for the `once` flag, returning 400).
+            // Iterating individually keeps one bad interface from killing the whole batch.
+            // Build a reverse map: key (.id or name) -> [usernames]
+            const reverseMap = {};
+            Object.entries(interfaceMap).forEach(([u, v]) => {
+                const key = v.id || v.name;
+                if (!reverseMap[key]) reverseMap[key] = [];
+                reverseMap[key].push(u);
+                // Also index by name (in case the response echoes back name not .id)
+                if (v.name && v.name !== key) {
+                    if (!reverseMap[v.name]) reverseMap[v.name] = [];
+                    reverseMap[v.name].push(u);
+                }
+            });
+
+            await Promise.all(uniqueInterfaces.map(async (key) => {
+                const entry = Object.values(interfaceMap).find(v => v.id === key || v.name === key);
+                const fallbackName = entry ? (entry.name || '').replace(/^</, '').replace(/>$/, '') : key;
+
+                // Try a sequence of candidate values to satisfy different RouterOS REST builds:
+                // 1) .id (most reliable for dynamic interfaces with bracketed display names)
+                // 2) stripped name (no surrounding < >)
+                // 3) raw name (last resort)
+                const candidates = [];
+                if (entry?.id) candidates.push(entry.id);
+                if (fallbackName) candidates.push(fallbackName);
+                if (entry?.name && !candidates.includes(entry.name)) candidates.push(entry.name);
+
+                let captured = false;
+                let lastErr = null;
+                for (const candidate of candidates) {
+                    if (captured) break;
+                    // Two payload variants per candidate (some RouterOS REST builds reject
+                    // boolean true for `once`, others reject empty string — try both).
+                    // Note: `numbers` is rejected by some firmwares with "unknown parameter numbers",
+                    // so we don't try it here.
+                    const payloads = [
+                        { interface: candidate, once: true },
+                        { interface: candidate, once: '' },
+                    ];
+                    for (const payload of payloads) {
+                        try {
+                            const r = await client.post('/interface/monitor-traffic', payload);
+                            const arr = Array.isArray(r.data) ? r.data : [r.data];
+                            arr.forEach(s => {
+                                const users =
+                                    reverseMap[s.name] ||
+                                    reverseMap[candidate] ||
+                                    reverseMap[entry?.id] ||
+                                    reverseMap[entry?.name] ||
+                                    [];
+                                users.forEach(u => {
+                                    result[u] = {
+                                        rx: parseInt(s['rx-bits-per-second'] || 0),
+                                        tx: parseInt(s['tx-bits-per-second'] || 0),
+                                    };
+                                });
+                            });
+                            captured = true;
+                            break;
+                        } catch (e) {
+                            lastErr = e;
+                        }
+                    }
+                }
+
+                if (!captured && lastErr) {
+                    const status = lastErr.response?.status;
+                    const detail = lastErr.response?.data?.detail || lastErr.response?.data?.message || lastErr.message;
+                    console.warn(`REST Traffic monitor failed for interface="${entry?.name || key}" status=${status || 'n/a'}: ${detail}`);
+                }
+            }));
+        }
+        
+        res.json(result);
+
+    } catch (e) {
+        console.error("Traffic Endpoint Error:", e);
+        // Ensure close if legacy and error happened before inner try/finally
+        if (req.router && req.router.api_type === 'legacy' && req.routerInstance) {
+             try { await req.routerInstance.close(); } catch(_) {}
+        }
+        res.status(500).json({});
+    }
+});
+
+// 2. DHCP Client Update Endpoint
+app.post('/:routerId/dhcp-client/update', getRouter, async (req, res) => {
+    const { 
+        macAddress, address, customerInfo, 
+        plan, downtimeDays, planType, graceDays, graceTime, 
+        expiresAt: manualExpiresAt, contactNumber, email, speedLimit 
+    } = req.body;
+
+    try {
+        // Calculate Expiration Date/Time
+        let expiresAt;
+        if (manualExpiresAt) {
+            expiresAt = new Date(manualExpiresAt);
+        } else if (graceDays) {
+            const now = new Date();
+            if (graceTime) {
+                const [hours, minutes] = graceTime.split(':').map(Number);
+                now.setHours(hours, minutes, 0, 0);
+            }
+            expiresAt = new Date(now.getTime() + (graceDays * 24 * 60 * 60 * 1000));
+        } else if (plan && plan.cycle_days) {
+            const now = new Date();
+            expiresAt = new Date(now.getTime() + (plan.cycle_days * 24 * 60 * 60 * 1000));
+        } else {
+            expiresAt = new Date(); 
+        }
+
+        const commentData = {
+            customerInfo,
+            contactNumber,
+            email,
+            planName: plan ? plan.name : '',
+            dueDate: expiresAt.toISOString().split('T')[0],
+            dueDateTime: expiresAt.toISOString(),
+            planType: planType || 'prepaid'
+        };
+
+        // Common Scheduler Script (RouterOS format)
+        const schedName = `deactivate-dhcp-${address.replace(/\./g, '-')}`;
+        const onEvent = `/ip firewall address-list remove [find where address='${address}' and list='authorized-dhcp-users']; /ip firewall connection remove [find where src-address~'^${address}']; :local leaseId [/ip dhcp-server lease find where address='${address}']; if ([:len $leaseId] > 0) do={ /ip firewall address-list add address='${address}' list='pending-dhcp-users' timeout=1d comment='${macAddress}'; }`;
+        
+        const months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+        const rosDate = `${months[expiresAt.getMonth()]}/${String(expiresAt.getDate()).padStart(2,'0')}/${expiresAt.getFullYear()}`;
+        const rosTime = expiresAt.toTimeString().split(' ')[0];
+
+        // --- API Interaction ---
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance;
+            await client.connect();
+
+            // 1. Ensure Authorized entry exists; attach expiry metadata
+            const addressLists = await writeLegacySafe(client, ['/ip/firewall/address-list/print', '?address=' + address, '?list=authorized-dhcp-users']);
+            if (Array.isArray(addressLists) && addressLists.length > 0) {
+                await client.write('/ip/firewall/address-list/set', { '.id': addressLists[0]['.id'], comment: JSON.stringify(commentData) });
+            } else {
+                await client.write('/ip/firewall/address-list/add', { address, list: 'authorized-dhcp-users', timeout: '0s', comment: JSON.stringify(commentData) });
+            }
+            const pendingLists = await writeLegacySafe(client, ['/ip/firewall/address-list/print', '?address=' + address, '?list=pending-dhcp-users']);
+            if (Array.isArray(pendingLists) && pendingLists.length > 0) {
+                await client.write('/ip/firewall/address-list/remove', { '.id': pendingLists[0]['.id'] });
+            }
+
+            // 2. Update/Create Simple Queue (Speed Limit)
+            if (speedLimit) {
+                const limitString = `${speedLimit}M/${speedLimit}M`;
+                const queues = await writeLegacySafe(client, ['/queue/simple/print', '?name=' + customerInfo]);
+                if (queues.length > 0) {
+                    await client.write('/queue/simple/set', {
+                        '.id': queues[0]['.id'],
+                        'max-limit': limitString
+                    });
+                } else {
+                    await client.write('/queue/simple/add', {
+                        name: customerInfo,
+                        target: address,
+                        'max-limit': limitString
+                    });
+                }
+            }
+            
+            // 3. Manage Scheduler
+            const scheds = await writeLegacySafe(client, ['/system/scheduler/print', '?name=' + schedName]);
+            if (scheds.length > 0) {
+                await client.write('/system/scheduler/remove', { '.id': scheds[0]['.id'] });
+            }
+            await client.write('/system/scheduler/add', {
+                name: schedName,
+                'start-date': rosDate,
+                'start-time': rosTime,
+                interval: '0s',
+                'on-event': onEvent
+            });
+
+            await client.close();
+        } else {
+            // REST API Logic
+            const instance = req.routerInstance;
+
+            // 1. Ensure Authorized entry exists; attach expiry metadata
+            try {
+                const alRes = await instance.get(`/ip/firewall/address-list?address=${address}&list=authorized-dhcp-users`);
+                if (alRes.data && alRes.data.length > 0) {
+                    await instance.patch(`/ip/firewall/address-list/${alRes.data[0]['.id']}`, { comment: JSON.stringify(commentData) });
+                } else {
+                    await instance.put(`/ip/firewall/address-list`, { address, list: 'authorized-dhcp-users', timeout: '0s', comment: JSON.stringify(commentData) });
+                }
+            } catch (e) { console.warn("Address list update warning", e.message); }
+            try {
+                const pendRes = await instance.get(`/ip/firewall/address-list?address=${address}&list=pending-dhcp-users`);
+                if (pendRes.data && pendRes.data.length > 0) {
+                    await instance.delete(`/ip/firewall/address-list/${pendRes.data[0]['.id']}`);
+                }
+            } catch (e) { console.warn("Pending list cleanup warning", e.message); }
+
+            // 2. Update Queue
+            if (speedLimit) {
+                 const limitString = `${speedLimit}M/${speedLimit}M`;
+                 const queueName = `DHCP-${macAddress}`;
+                 try {
+                    const qRes = await instance.get(`/queue/simple?name=${queueName}`);
+                    if (qRes.data && qRes.data.length > 0) {
+                        await instance.patch(`/queue/simple/${qRes.data[0]['.id']}`, { 'max-limit': limitString, comment: customerInfo });
+                    } else {
+                        await instance.put(`/queue/simple`, {
+                           name: queueName,
+                           target: address,
+                           'max-limit': limitString,
+                           comment: customerInfo
+                        });
+                    }
+                 } catch (e) { console.error("Queue update error", e.message); }
+            }
+
+            // 3. Update Scheduler
+            try {
+                const sRes = await instance.get(`/system/scheduler?name=${schedName}`);
+                if (sRes.data && sRes.data.length > 0) {
+                    await instance.delete(`/system/scheduler/${sRes.data[0]['.id']}`);
+                }
+                
+                await instance.put(`/system/scheduler`, {
+                    name: schedName,
+                    'start-date': rosDate,
+                    'start-time': rosTime,
+                    interval: '0s',
+                    'on-event': onEvent
+                });
+            } catch (e) { console.error("Scheduler update error", e.message); }
+        }
+        
+        res.json({ message: 'Updated successfully' });
+    } catch (e) {
+        console.error("Update Error:", e.message);
+        res.status(500).json({ message: e.message });
+    }
+});
+
+// 4. PPP User Save
+app.post('/:routerId/ppp/user/save', getRouter, async (req, res) => {
+    const { initialSecret, secretData, subscriptionData } = req.body;
+    console.log('[ppp/user/save] router:', req.params.routerId, 'branch:', req.router.api_type, 'payload:', safeStringify(maskSensitive({ initialSecret: initialSecret ? { id: initialSecret.id, name: initialSecret.name } : null, secretData, subscriptionData })));
+    if (!secretData || !secretData.name || String(secretData.name).trim() === '') return res.status(400).json({ message: 'Invalid input: secretData.name is required.' });
+    try {
+        const isGrace = subscriptionData && Number(subscriptionData.graceDays) > 0;
+        const due = subscriptionData?.dueDateTime || subscriptionData?.dueDate;
+        let d = due ? new Date(due) : null;
+        if (d && isNaN(d.getTime())) {
+            d = null;
+        }
+        if (!d && isGrace) {
+            const now = new Date();
+            d = new Date(now.getTime() + Number(subscriptionData.graceDays) * 86400000);
+            if (subscriptionData.graceTime) {
+                const parts = String(subscriptionData.graceTime).split(':');
+                const hours = Number(parts[0] || 0);
+                const minutes = Number(parts[1] || 0);
+                d.setHours(hours, minutes, 0, 0);
+            }
+        }
+        const schedName = isGrace ? `ppp-grace-expire-${String(secretData.name)}` : `ppp-auto-kick-${String(secretData.name)}`;
+        const months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+        const rosDate = d ? `${months[d.getMonth()]}/${String(d.getDate()).padStart(2,'0')}/${d.getFullYear()}` : null;
+        const rosTime = d ? d.toTimeString().split(' ')[0] : null;
+        const onEventProfile = subscriptionData?.nonPaymentProfile ? `\n/ppp secret set [find name="${String(secretData.name)}"] profile="${String(subscriptionData.nonPaymentProfile)}"` : '';
+const onEvent = `/log info message="PPPoE auto-kick: ${String(secretData.name)}"\n:do { /ppp active remove [find name="${String(secretData.name)}"] } on-error={}${onEventProfile}`;
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance; await client.connect();
+            try {
+                let targetId = initialSecret?.id || null;
+                try {
+                    if (!targetId) {
+                        const existing = await writeLegacySafe(client, ['/ppp/secret/print', '?name=' + String(secretData.name)]);
+                        if (Array.isArray(existing) && existing.length > 0) targetId = existing[0]['.id'];
+                    }
+                } catch (_) {}
+                const payload = {};
+                if (targetId) payload['.id'] = targetId;
+                if (secretData.name != null) payload['name'] = String(secretData.name);
+                if (secretData.password != null) payload['password'] = String(secretData.password);
+                const isGrace = subscriptionData && Number(subscriptionData.graceDays) > 0;
+                let originalProfileVal = initialSecret?.profile;
+                try {
+                    const cur = await writeLegacySafe(client, ['/ppp/secret/print', '?name=' + String(secretData.name)]);
+                    if (Array.isArray(cur) && cur.length > 0) originalProfileVal = cur[0]['profile'] || originalProfileVal;
+                } catch (_) {}
+                if (isGrace) payload['profile'] = String(secretData.profile || originalProfileVal || '');
+                else if (secretData.profile != null) payload['profile'] = String(secretData.profile);
+                if (secretData.service != null) payload['service'] = String(secretData.service); else if (!targetId) payload['service'] = 'pppoe';
+                if (typeof secretData.disabled === 'boolean') payload['disabled'] = secretData.disabled ? 'yes' : 'no';
+                else if (typeof secretData.disabled === 'string') payload['disabled'] = secretData.disabled === 'true' ? 'yes' : 'no';
+                if (subscriptionData != null) {
+                    const meta = await writeLegacySafe(client, ['/ppp/secret/print', '?name=' + String(secretData.name)]);
+                    let preservedPlanType = '';
+                    try { const c = JSON.parse(meta[0]?.comment || '{}'); preservedPlanType = (c.planType || '').toLowerCase(); } catch (_) {}
+                    const db = await getDb(); const row = await db.get('SELECT original_plan_type FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secretData.name)]);
+                    if (row?.original_plan_type) preservedPlanType = (row.original_plan_type || '').toLowerCase();
+                    let base = {}; try { base = JSON.parse(meta[0]?.comment || '{}'); } catch (_) {}
+                    const merged = { ...base, ...subscriptionData, planType: (subscriptionData.planType || '').toLowerCase() || preservedPlanType };
+                    if (subscriptionData?.dueDate) { const s = String(subscriptionData.dueDate); const datePart = s.split('T')[0]; merged.dueDate = datePart; merged.dueDateTime = s; }
+                    if (d && !subscriptionData?.dueDate) { const y = d.getFullYear(); const m = String(d.getMonth()+1).padStart(2,'0'); const dd = String(d.getDate()).padStart(2,'0'); const hh = String(d.getHours()).padStart(2,'0'); const mm = String(d.getMinutes()).padStart(2,'0'); const datePart = `${y}-${m}-${dd}`; merged.dueDate = datePart; merged.dueDateTime = `${datePart}T${hh}:${mm}`; }
+                    payload['comment'] = JSON.stringify(merged);
+                    console.log('[ppp/user/save] preserve planType:', preservedPlanType || subscriptionData.planType || 'unknown');
+                }
+                if (targetId) {
+                    try {
+                        const args = ['/ppp/secret/set', `=.id=${targetId}`];
+                        if (payload['password'] != null) args.push(`=password=${String(payload['password'])}`);
+                        if (payload['profile'] != null) args.push(`=profile=${String(payload['profile'])}`);
+                        if (payload['service'] != null) args.push(`=service=${String(payload['service'])}`);
+                        if (payload['disabled'] != null) args.push(`=disabled=${String(payload['disabled'])}`);
+                        if (payload['comment'] != null) args.push(`=comment=${String(payload['comment'])}`);
+                        await client.write('/ppp/secret/set', args.slice(1));
+                    } catch (err) {
+                        console.warn('[ppp/user/save][legacy] set failed, falling back to add:', err.message);
+                        const addArgs = ['/ppp/secret/add', `=name=${String(secretData.name)}`, `=service=${String(payload['service'] || 'pppoe')}`];
+                        if (payload['password'] != null) addArgs.push(`=password=${String(payload['password'])}`);
+                        if (payload['profile'] != null) addArgs.push(`=profile=${String(payload['profile'])}`);
+                        if (payload['disabled'] != null) addArgs.push(`=disabled=${String(payload['disabled'])}`);
+                        if (payload['comment'] != null) addArgs.push(`=comment=${String(payload['comment'])}`);
+                        await client.write('/ppp/secret/add', addArgs.slice(1));
+                    }
+                } else {
+                    const addArgs = ['/ppp/secret/add', `=name=${String(secretData.name)}`, `=service=${String(payload['service'] || 'pppoe')}`];
+                    if (payload['password'] != null) addArgs.push(`=password=${String(payload['password'])}`);
+                    if (payload['profile'] != null) addArgs.push(`=profile=${String(payload['profile'])}`);
+                    if (payload['disabled'] != null) addArgs.push(`=disabled=${String(payload['disabled'])}`);
+                    if (payload['comment'] != null) addArgs.push(`=comment=${String(payload['comment'])}`);
+                    await client.write('/ppp/secret/add', addArgs.slice(1));
+                }
+                if (targetId && initialSecret?.name && String(initialSecret.name) !== String(secretData.name)) {
+                    try { await client.write('/ppp/secret/set', [`=.id=${targetId}`, `=name=${String(secretData.name)}`]); }
+                    catch (e) { try { await client.write('/ppp/secret/set', [`=numbers=${targetId}`, `=name=${String(secretData.name)}`]); } catch (_) {} }
+                }
+                const prevProfile = String(originalProfileVal || '');
+                const desiredProfile = String(payload['profile'] || '');
+                const shouldKick = isGrace && desiredProfile && (desiredProfile !== prevProfile || prevProfile === String(subscriptionData?.nonPaymentProfile || 'Non-Payment'));
+                if (shouldKick) {
+                    try {
+                        const active = await writeLegacySafe(client, ['/ppp/active/print', `?name=${String(secretData.name)}`]);
+                        if (active.length > 0 && active[0]['.id']) {
+                            await client.write('/ppp/active/remove', { '.id': active[0]['.id'] });
+                        }
+                        console.log('[ppp/grace/transition] legacy kick applied for', secretData.name);
+                    } catch (e) { console.warn('[ppp/grace/transition] legacy kick failed:', e.message); }
+                } else {
+                    console.log('[ppp/grace/transition] legacy no kick (profile unchanged or not grace)');
+                }
+                if (d) {
+                    try {
+                        const s = await writeLegacySafe(client, ['/system/scheduler/print', `?name=${schedName}`]);
+                        if (Array.isArray(s) && s.length > 0 && s[0]['.id']) await client.write('/system/scheduler/remove', { '.id': s[0]['.id'] });
+                        await client.write('/system/scheduler/add', { name: schedName, 'start-date': rosDate, 'start-time': rosTime, interval: '0s', 'on-event': onEvent });
+                    } catch (e) { console.warn('[ppp/user/save] scheduler update failed:', e.message); }
+                    const database = await getDb();
+                    const nowIso = new Date().toISOString();
+                    const originalProfileToStore = String(payload['profile'] || originalProfileVal || '');
+                    await database.run('INSERT OR REPLACE INTO ppp_grace (router_id, name, activated_at, expires_at, original_profile, original_plan_type, non_payment_profile, metadata) VALUES (?,?,?,?,?,?,?,?)', [req.params.routerId, String(secretData.name), nowIso, d.toISOString(), originalProfileToStore, (subscriptionData?.planType || '').toLowerCase(), String(subscriptionData?.nonPaymentProfile || ''), JSON.stringify({ graceDays: Number(subscriptionData?.graceDays || 0), graceTime: subscriptionData?.graceTime || null })]);
+                }
+                
+                // Force remove active connection to apply changes immediately
+                try {
+                    const active = await writeLegacySafe(client, ['/ppp/active/print', `?name=${String(secretData.name)}`]);
+                    if (active.length > 0 && active[0]['.id']) {
+                        await client.write('/ppp/active/remove', { '.id': active[0]['.id'] });
+                    }
+                } catch (e) { console.warn('[ppp/user/save] legacy active remove failed:', e.message); }
+
+                const saved = await writeLegacySafe(client, ['/ppp/secret/print', '?name=' + String(secretData.name)]);
+                res.json(saved.map(normalizeLegacyObject));
+            } finally { await client.close(); }
+        } else {
+            const instance = req.routerInstance; const name = encodeURIComponent(String(secretData.name));
+            const qRes = await instance.get(`/ppp/secret?name=${name}`); const existing = Array.isArray(qRes.data) && qRes.data.length > 0 ? qRes.data[0] : null;
+            const payload = {};
+            if (secretData.name != null) payload['name'] = String(secretData.name);
+            if (secretData.password != null) payload['password'] = String(secretData.password);
+            const isGrace = subscriptionData && Number(subscriptionData.graceDays) > 0;
+            let originalProfileVal = initialSecret?.profile || (existing && existing['profile']);
+            if (!originalProfileVal) {
+                try { const s2 = await instance.get(`/ppp/secret?name=${name}`); if (Array.isArray(s2.data) && s2.data.length > 0) originalProfileVal = s2.data[0]['profile']; } catch (_) {}
+            }
+            if (isGrace) payload['profile'] = String(secretData.profile || originalProfileVal || '');
+            else if (secretData.profile != null) payload['profile'] = String(secretData.profile);
+            if (secretData.service != null) payload['service'] = String(secretData.service); else if (!existing) payload['service'] = 'pppoe';
+            if (typeof secretData.disabled === 'boolean') payload['disabled'] = secretData.disabled ? 'yes' : 'no';
+            else if (typeof secretData.disabled === 'string') payload['disabled'] = secretData.disabled === 'true' ? 'yes' : 'no';
+            if (subscriptionData != null) {
+                const encName = encodeURIComponent(String(secretData.name));
+                const s = await instance.get(`/ppp/secret?name=${encName}`);
+                let preservedPlanType = '';
+                try { const c = JSON.parse((Array.isArray(s.data) && s.data[0]?.comment) || '{}'); preservedPlanType = (c.planType || '').toLowerCase(); } catch (_) {}
+                const db = await getDb(); const row = await db.get('SELECT original_plan_type FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secretData.name)]);
+                if (row?.original_plan_type) preservedPlanType = (row.original_plan_type || '').toLowerCase();
+                let base = {}; try { base = JSON.parse((Array.isArray(s.data) && s.data[0]?.comment) || '{}'); } catch (_) {}
+                const merged = { ...base, ...subscriptionData, planType: (subscriptionData.planType || '').toLowerCase() || preservedPlanType };
+                if (subscriptionData?.dueDate) { const sVal = String(subscriptionData.dueDate); const datePart = sVal.split('T')[0]; merged.dueDate = datePart; merged.dueDateTime = sVal; }
+                if (d && !subscriptionData?.dueDate) { const y = d.getFullYear(); const m = String(d.getMonth()+1).padStart(2,'0'); const dd = String(d.getDate()).padStart(2,'0'); const hh = String(d.getHours()).padStart(2,'0'); const mm = String(d.getMinutes()).padStart(2,'0'); const datePart = `${y}-${m}-${dd}`; merged.dueDate = datePart; merged.dueDateTime = `${datePart}T${hh}:${mm}`; }
+                payload['comment'] = JSON.stringify(merged);
+                console.log('[ppp/user/save] preserve planType:', preservedPlanType || subscriptionData.planType || 'unknown');
+            }
+            if (existing) await instance.patch(`/ppp/secret/${existing['.id']}`, payload); else await instance.put(`/ppp/secret`, payload);
+            const prevProfile = String(originalProfileVal || '');
+const desiredProfile = String(payload['profile'] || '');
+const shouldKick = isGrace && desiredProfile && (desiredProfile !== prevProfile || prevProfile === String(subscriptionData?.nonPaymentProfile || 'Non-Payment'));
+if (shouldKick) {
+    try { await req.routerInstance.post('/ppp/active/remove', { name: String(secretData.name) }); console.log('[ppp/grace/transition] rest kick applied for', secretData.name); }
+    catch (e) { console.warn('[ppp/grace/transition] rest kick failed:', e.message); }
+} else {
+    console.log('[ppp/grace/transition] rest no kick (profile unchanged or not grace)');
+}
+            if (d) {
+                const sch = await instance.get(`/system/scheduler?name=${encodeURIComponent(schedName)}`);
+                if (Array.isArray(sch.data) && sch.data.length > 0) await instance.delete(`/system/scheduler/${sch.data[0]['.id']}`);
+                await instance.put(`/system/scheduler`, { name: schedName, 'start-date': rosDate, 'start-time': rosTime, interval: '0s', 'on-event': onEvent });
+                const database = await getDb();
+                const nowIso = new Date().toISOString();
+                const originalProfileToStore = String(payload['profile'] || originalProfileVal || '');
+                await database.run('INSERT OR REPLACE INTO ppp_grace (router_id, name, activated_at, expires_at, original_profile, original_plan_type, non_payment_profile, metadata) VALUES (?,?,?,?,?,?,?,?)', [req.params.routerId, String(secretData.name), nowIso, d.toISOString(), originalProfileToStore, (subscriptionData?.planType || '').toLowerCase(), String(subscriptionData?.nonPaymentProfile || ''), JSON.stringify({ graceDays: Number(subscriptionData?.graceDays || 0), graceTime: subscriptionData?.graceTime || null })]);
+            }
+            
+            // Force remove active connection to apply changes immediately
+            try {
+                const activeRes = await instance.get(`/ppp/active?name=${name}`);
+                if (Array.isArray(activeRes.data) && activeRes.data.length > 0) {
+                     await instance.delete(`/ppp/active/${activeRes.data[0]['.id']}`);
+                }
+            } catch (e) { console.warn('[ppp/user/save] REST active remove failed:', e.message); }
+
+            const savedRes = await instance.get(`/ppp/secret?name=${name}`);
+            const database = await getDb(); await database.run('DELETE FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secretData.name)]);
+            res.json(savedRes.data);
+        }
+    } catch (e) {
+        console.error('[ppp/user/save] error:', safeStringify({ routerId: req.params.routerId, message: e.message, status: e.response?.status, data: e.response?.data }));
+        const status = e.response ? e.response.status : 500; const msg = e.response?.data?.message || e.response?.data?.detail || e.message; res.status(status).json({ message: msg });
+    }
+});
+
+// 5. PPP Payment Process
+app.post('/:routerId/ppp/payment/process', getRouter, async (req, res) => {
+    const { secret, plan, nonPaymentProfile, discountDays, paymentDate } = req.body;
+    console.log('[ppp/payment/process] router:', req.params.routerId, 'branch:', req.router.api_type, 'payload:', safeStringify(maskSensitive({ secret: secret ? { id: secret.id, name: secret.name } : null, plan, nonPaymentProfile, discountDays, paymentDate })));
+    if (!secret || !secret.name) return res.status(400).json({ message: 'Invalid input: secret.name is required.' });
+    if (!plan || !plan.pppoeProfile) return res.status(400).json({ message: 'Invalid input: plan.pppoeProfile is required.' });
+    try {
+        const cycleDays = Number(plan.cycleDays ?? plan.cycle_days ?? 30);
+        const discount = Number(discountDays ?? 0);
+        const start = paymentDate ? new Date(paymentDate) : new Date();
+        
+        let expires;
+        let fixedDay = null;
+
+        // Smart Due Date Logic
+        try {
+            if (secret && secret.comment) {
+                const c = JSON.parse(secret.comment);
+                if (c.fixedDay) fixedDay = parseInt(c.fixedDay);
+                else if (c.dueDate) {
+                    const d = new Date(c.dueDate);
+                    if (!isNaN(d.getTime())) fixedDay = d.getDate();
+                }
+            }
+        } catch (e) {}
+        if (!fixedDay) fixedDay = start.getDate();
+
+        if (cycleDays >= 28 && cycleDays <= 31) {
+            let targetYear = start.getFullYear();
+            let targetMonth = start.getMonth() + 1; // Default to next month
+            
+            // Smart Check: If fixedDay is far enough in the current month (e.g. recovery from Feb shift), stay in current month
+            // Example: Start=Mar 1, Fixed=30. Gap is 29 days. We want Mar 30, not Apr 30.
+            // Threshold: 20 days ensures we don't accidentally shorten a cycle too much (e.g. Jan 29 -> Jan 30).
+            if (fixedDay >= start.getDate() + 20) {
+                targetMonth = start.getMonth();
+            }
+
+            if (targetMonth > 11) { targetMonth = 0; targetYear++; }
+            
+            const daysInTargetMonth = new Date(targetYear, targetMonth + 1, 0).getDate();
+            let targetDay = fixedDay;
+            
+            // Handle February 30th -> March 1st edge case
+            if (targetMonth === 1 && fixedDay > daysInTargetMonth) {
+                targetMonth = 2; // March
+                targetDay = 1;
+            } else if (targetDay > daysInTargetMonth) {
+                targetDay = daysInTargetMonth;
+            }
+            
+            expires = new Date(targetYear, targetMonth, targetDay, start.getHours(), start.getMinutes(), start.getSeconds());
+            
+            // Apply discount (reduce days)
+            if (discount > 0) expires.setDate(expires.getDate() - discount);
+        } else {
+            const effectiveDays = Math.max(0, cycleDays - discount);
+            expires = new Date(start.getTime() + effectiveDays * 24 * 60 * 60 * 1000);
+        }
+
+        const commentData = { planName: plan?.name || '', dueDate: expires.toISOString().split('T')[0], dueDateTime: expires.toISOString(), paymentDate: start.toISOString(), discountDays: discount, kickFlag: true, fixedDay };
+        const months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+        const rosDate = `${months[expires.getMonth()]}/${String(expires.getDate()).padStart(2,'0')}/${expires.getFullYear()}`;
+        const rosTime = expires.toTimeString().split(' ')[0];
+        const schedName = `ppp-auto-kick-${String(secret.name)}`;
+        const onEventProfile = nonPaymentProfile ? `\n/ppp secret set [find name="${String(secret.name)}"] profile="${String(nonPaymentProfile)}"` : '';
+const onEvent = `/log info message="PPPoE auto-kick: ${String(secret.name)}"\n:do { /ppp active remove [find name="${String(secret.name)}"] } on-error={}${onEventProfile}`;
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance; await client.connect();
+            try {
+                let id = secret?.id || null;
+                let currentComment = null; let preservedPlanType = '';
+                try {
+                    if (!id) {
+                        const existing = await writeLegacySafe(client, ['/ppp/secret/print', '?name=' + String(secret.name)]);
+                        if (!Array.isArray(existing) || existing.length === 0) return res.status(404).json({ message: 'PPP secret not found.' });
+                        id = existing[0]['.id']; currentComment = existing[0]['comment'];
+                    } else {
+                        const existing = await writeLegacySafe(client, ['/ppp/secret/print', '?.id=' + String(id)]);
+                        currentComment = Array.isArray(existing) && existing[0] ? existing[0]['comment'] : null;
+                    }
+                } catch (_) {}
+                try { const c = JSON.parse(currentComment || '{}'); preservedPlanType = (c.planType || '').toLowerCase(); } catch (_) {}
+                const db = await getDb(); const row = await db.get('SELECT original_plan_type FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secret.name)]);
+                if (row?.original_plan_type) preservedPlanType = (row.original_plan_type || '').toLowerCase();
+                const finalComment = JSON.stringify({ ...commentData, planType: preservedPlanType || (plan.planType || '').toLowerCase() });
+                console.log('[ppp/payment/process] preserve planType:', preservedPlanType || plan.planType || 'unknown');
+                await client.write('/ppp/secret/set', [`=.id=${id}`, `=profile=${String(plan.pppoeProfile)}`, `=comment=${finalComment}`]);
+                try {
+                    const s = await writeLegacySafe(client, ['/system/scheduler/print', `?name=${schedName}`]);
+                    if (Array.isArray(s) && s.length > 0 && s[0]['.id']) await client.write('/system/scheduler/remove', { '.id': s[0]['.id'] });
+                    await client.write('/system/scheduler/add', { name: schedName, 'start-date': rosDate, 'start-time': rosTime, interval: '0s', 'on-event': onEvent });
+                } catch (e) { console.warn('[ppp/payment/process] scheduler update failed:', e.message); }
+                
+                try {
+                    const active = await writeLegacySafe(client, ['/ppp/active/print', `?name=${String(secret.name)}`]);
+                    if (active.length > 0 && active[0]['.id']) {
+                        await client.write('/ppp/active/remove', { '.id': active[0]['.id'] });
+                    }
+                } catch (e) { console.warn('[ppp/payment/process] active remove failed:', e.message); }
+                
+                const saved = await writeLegacySafe(client, ['/ppp/secret/print', '?name=' + String(secret.name)]);
+                const database = await getDb(); await database.run('DELETE FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secret.name)]);
+                res.json(saved.map(normalizeLegacyObject));
+            } finally { await client.close(); }
+        } else {
+            const instance = req.routerInstance;
+            const name = encodeURIComponent(String(secret.name));
+            const sRes = await instance.get(`/ppp/secret?name=${name}`);
+            if (!Array.isArray(sRes.data) || sRes.data.length === 0) return res.status(404).json({ message: 'PPP secret not found.' });
+            const id = sRes.data[0]['.id']; const currentComment = sRes.data[0]['comment']; let preservedPlanType = '';
+            try { const c = JSON.parse(currentComment || '{}'); preservedPlanType = (c.planType || '').toLowerCase(); } catch (_) {}
+            const db = await getDb(); const row = await db.get('SELECT original_plan_type FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secret.name)]);
+            if (row?.original_plan_type) preservedPlanType = (row.original_plan_type || '').toLowerCase();
+            const finalComment = JSON.stringify({ ...commentData, planType: preservedPlanType || (plan.planType || '').toLowerCase() });
+            console.log('[ppp/payment/process] preserve planType:', preservedPlanType || plan.planType || 'unknown');
+            await instance.patch(`/ppp/secret/${id}`, { 'profile': String(plan.pppoeProfile), 'comment': finalComment });
+            const sch = await instance.get(`/system/scheduler?name=${encodeURIComponent(schedName)}`);
+            if (Array.isArray(sch.data) && sch.data.length > 0) await instance.delete(`/system/scheduler/${sch.data[0]['.id']}`);
+            await instance.put(`/system/scheduler`, { name: schedName, 'start-date': rosDate, 'start-time': rosTime, interval: '0s', 'on-event': onEvent });
+            try { 
+                const activeRes = await instance.get(`/ppp/active?name=${name}`);
+                if (Array.isArray(activeRes.data) && activeRes.data.length > 0) {
+                    await instance.delete(`/ppp/active/${activeRes.data[0]['.id']}`);
+                }
+            } catch (e) { console.warn('[ppp/payment/process] REST active remove failed:', e.message); }
+            const savedRes = await instance.get(`/ppp/secret?name=${name}`);
+            res.json(savedRes.data);
+        }
+    } catch (e) {
+        console.error('[ppp/payment/process] error:', safeStringify({ routerId: req.params.routerId, message: e.message, status: e.response?.status, data: e.response?.data }));
+        const status = e.response ? e.response.status : 500; const msg = e.response?.data?.message || e.response?.data?.detail || e.message; res.status(status).json({ message: msg });
+    }
+});
+
+// PPP Grace: Grant
+app.post('/:routerId/ppp/grace/grant', getRouter, async (req, res) => {
+    const { name, graceDays, originalPlanType, originalProfile, nonPaymentProfile } = req.body; if (!name || !graceDays) return res.status(400).json({ message: 'name and graceDays are required' });
+    try {
+        const database = await getDb();
+        const existing = await database.get('SELECT * FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(name)]);
+        if (existing) return res.status(409).json({ message: 'Grace period already active for this user' });
+        const now = new Date(); const activatedAt = now.toISOString(); const expiresAt = new Date(now.getTime() + Number(graceDays) * 86400000);
+        const months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+        const rosDate = `${months[expiresAt.getMonth()]}/${String(expiresAt.getDate()).padStart(2,'0')}/${expiresAt.getFullYear()}`; const rosTime = expiresAt.toTimeString().split(' ')[0];
+        const schedName = `ppp-grace-expire-${String(name)}`;
+        const onEvent = `/log info message="PPPoE grace expired: ${String(name)}"\n:do { /ppp/active/remove [find name="${String(name)}"] } on-error={}`;
+        const commentExtend = { graceDays: Number(graceDays), graceActivatedAt: activatedAt, kickFlag: true, originalPlanType: originalPlanType || '' };
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance; await client.connect();
+            try {
+                const s = await writeLegacySafe(client, ['/ppp/secret/print', `?name=${String(name)}`]); if (!Array.isArray(s) || s.length === 0) return res.status(404).json({ message: 'PPP secret not found' });
+                const id = s[0]['.id']; const currentComment = s[0]['comment']; let payloadComment;
+                try { const c = JSON.parse(currentComment || '{}'); const preservedPlanType = (c.planType || originalPlanType || '').toLowerCase(); const merged = { ...c, ...commentExtend, planType: preservedPlanType }; payloadComment = JSON.stringify(merged); console.log('[ppp/grace/grant] preserve planType:', preservedPlanType || 'unknown'); }
+                catch (_) { payloadComment = JSON.stringify({ ...commentExtend, planType: (originalPlanType || '').toLowerCase() }); }
+                await client.write('/ppp/secret/set', [`=.id=${id}`, `=comment=${payloadComment}`]);
+                if (originalProfile) await client.write('/ppp/secret/set', [`=.id=${id}`, `=profile=${String(originalProfile)}`]);
+                const sch = await writeLegacySafe(client, ['/system/scheduler/print', `?name=${schedName}`]); if (Array.isArray(sch) && sch.length > 0) await client.write('/system/scheduler/remove', { '.id': sch[0]['.id'] });
+                await client.write('/system/scheduler/add', { name: schedName, 'start-date': rosDate, 'start-time': rosTime, interval: '0s', 'on-event': onEvent });
+            } finally { await client.close(); }
+        } else {
+            const instance = req.routerInstance; const encName = encodeURIComponent(String(name));
+            const sRes = await instance.get(`/ppp/secret?name=${encName}`); if (!Array.isArray(sRes.data) || sRes.data.length === 0) return res.status(404).json({ message: 'PPP secret not found' });
+            const id = sRes.data[0]['.id']; const currentComment = sRes.data[0]['comment']; let payloadComment;
+            try { const c = JSON.parse(currentComment || '{}'); const preservedPlanType = (c.planType || originalPlanType || '').toLowerCase(); const merged = { ...c, ...commentExtend, planType: preservedPlanType }; payloadComment = JSON.stringify(merged); console.log('[ppp/grace/grant] preserve planType:', preservedPlanType || 'unknown'); }
+            catch (_) { payloadComment = JSON.stringify({ ...commentExtend, planType: (originalPlanType || '').toLowerCase() }); }
+            await instance.patch(`/ppp/secret/${id}`, { comment: payloadComment });
+            if (originalProfile) await instance.patch(`/ppp/secret/${id}`, { profile: String(originalProfile) });
+            const sch = await instance.get(`/system/scheduler?name=${encodeURIComponent(schedName)}`); if (Array.isArray(sch.data) && sch.data.length > 0) await instance.delete(`/system/scheduler/${sch.data[0]['.id']}`);
+            await instance.put(`/system/scheduler`, { name: schedName, 'start-date': rosDate, 'start-time': rosTime, interval: '0s', 'on-event': onEvent });
+        }
+        await database.run('INSERT OR REPLACE INTO ppp_grace (router_id, name, activated_at, expires_at, original_profile, original_plan_type, non_payment_profile, metadata) VALUES (?,?,?,?,?,?,?,?)', [req.params.routerId, String(name), activatedAt, expiresAt.toISOString(), originalProfile || null, originalPlanType || null, nonPaymentProfile || null, JSON.stringify({ graceDays })]);
+        res.json({ message: 'Grace period granted', name, activatedAt, expiresAt: expiresAt.toISOString() });
+    } catch (e) { const s = e.response ? e.response.status : 500; const m = e.response?.data?.message || e.response?.data?.detail || e.message; res.status(s).json({ message: m }); }
+});
+
+// PPP Grace: Status
+app.get('/:routerId/ppp/grace/status', async (req, res) => {
+    const { name } = req.query; if (!name) return res.status(400).json({ message: 'name is required' });
+    try { const database = await getDb(); const row = await database.get('SELECT * FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(name)]); res.json(row || {}); }
+    catch (e) { const s = e.response ? e.response.status : 500; const m = e.response?.data?.message || e.response?.data?.detail || e.message; res.status(s).json({ message: m }); }
+});
+
+// WAN Routes (only routes with check-gateway)
+app.get('/:routerId/ip/wan-routes', getRouter, async (req, res) => {
+    try {
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance; await client.connect();
+            try {
+                let routes = await writeLegacySafe(client, ['/ip/route/print']);
+                routes = routes.map(normalizeLegacyObject);
+                res.json(routes.filter(r => r['check-gateway']));
+            } finally { await client.close(); }
+        } else {
+            const response = await req.routerInstance.get('/ip/route');
+            res.json(response.data.filter(r => r['check-gateway']));
+        }
+    } catch (e) {
+        const s = e.response ? e.response.status : 500;
+        const m = e.response?.data?.message || e.response?.data?.detail || e.message;
+        res.status(s).json({ message: m });
+    }
+});
+
+// WAN Failover Status
+app.get('/:routerId/ip/wan-failover/status', getRouter, async (req, res) => {
+    try {
+        let routes;
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance; await client.connect();
+            try { routes = await writeLegacySafe(client, ['/ip/route/print']); } finally { await client.close(); }
+            routes = routes.map(normalizeLegacyObject);
+        } else {
+            const response = await req.routerInstance.get('/ip/route');
+            routes = response.data;
+        }
+        const wanRoutes = routes.filter(r => r['check-gateway']);
+        const enabled = wanRoutes.some(r => r.disabled === 'false' || r.disabled === false);
+        res.json({ enabled });
+    } catch (e) {
+        const s = e.response ? e.response.status : 500;
+        const m = e.response?.data?.message || e.response?.data?.detail || e.message;
+        res.status(s).json({ message: m });
+    }
+});
+
+// Configure WAN Failover (enable/disable check-gateway routes)
+app.post('/:routerId/ip/wan-failover', getRouter, async (req, res) => {
+    try {
+        const { enabled } = req.body;
+        if (typeof enabled !== 'boolean') return res.status(400).json({ message: 'enabled must be boolean' });
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance; await client.connect();
+            try {
+                let routes = await writeLegacySafe(client, ['/ip/route/print']);
+                routes = routes.map(normalizeLegacyObject);
+                const wanRoutes = routes.filter(r => r['check-gateway']);
+                await Promise.all(wanRoutes.map(r => client.write('/ip/route/set', { '.id': r.id || r['.id'], disabled: enabled ? 'no' : 'yes' })));
+            } finally { await client.close(); }
+        } else {
+            const response = await req.routerInstance.get('/ip/route');
+            const wanRoutes = response.data.filter(r => r['check-gateway']);
+            await Promise.all(wanRoutes.map(r => req.routerInstance.patch(`/ip/route/${r.id}`, { disabled: !enabled })));
+        }
+        res.json({ message: `WAN failover routes have been ${enabled ? 'enabled' : 'disabled'}.` });
+    } catch (e) {
+        const s = e.response ? e.response.status : 500;
+        const m = e.response?.data?.message || e.response?.data?.detail || e.message;
+        res.status(s).json({ message: m });
+    }
+});
+
+// PPP Active Kick
+app.post('/:routerId/ppp/active/kick', getRouter, async (req, res) => {
+    const { name } = req.body; if (!name) return res.status(400).json({ message: 'name is required' });
+    try {
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance; await client.connect();
+            try { await writeLegacySafe(client, ['/ppp/active/remove', `?name=${String(name)}`]); res.json({ message: 'Active sessions removed', name }); }
+            finally { await client.close(); }
+        } else {
+            try { await req.routerInstance.post('/ppp/active/remove', { name: String(name) }); res.json({ message: 'Active sessions removed', name }); }
+            catch (e) { const s = e.response ? e.response.status : 500; const m = e.response?.data?.message || e.response?.data?.detail || e.message; res.status(s).json({ message: m }); }
+        }
+    } catch (e) { const s = e.response ? e.response.status : 500; const m = e.response?.data?.message || e.response?.data?.detail || e.message; res.status(s).json({ message: m }); }
+});
+
+// PPP Scheduler Refresh
+app.post('/:routerId/ppp/scheduler/refresh', getRouter, async (req, res) => {
+    const { name, dueDateTime, nonPaymentProfile } = req.body; if (!name || !dueDateTime) return res.status(400).json({ message: 'name and dueDateTime are required' });
+    try {
+        let d = new Date(dueDateTime); if (isNaN(d.getTime())) return res.status(400).json({ message: 'Invalid dueDateTime' });
+        const months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+        const rosDate = `${months[d.getMonth()]}/${String(d.getDate()).padStart(2,'0')}/${d.getFullYear()}`; const rosTime = d.toTimeString().split(' ')[0];
+        const schedName = `ppp-auto-kick-${String(name)}`; const onEventProfile = nonPaymentProfile ? ` /ppp/secret/set [find name="${String(name)}"] profile=${String(nonPaymentProfile)}` : ''; const onEvent = `/log info message="PPPoE auto-kick: ${String(name)}"\n:do { /ppp/active/remove [find name="${String(name)}"] } on-error={}\n${onEventProfile}`;
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance; await client.connect();
+            try { const s = await writeLegacySafe(client, ['/system/scheduler/print', `?name=${schedName}`]); if (Array.isArray(s) && s.length > 0) await client.write('/system/scheduler/remove', { '.id': s[0]['.id'] }); await client.write('/system/scheduler/add', { name: schedName, 'start-date': rosDate, 'start-time': rosTime, interval: '0s', 'on-event': onEvent }); res.json({ message: 'Scheduler refreshed', name, schedName }); }
+            finally { await client.close(); }
+        } else {
+            const sch = await req.routerInstance.get(`/system/scheduler?name=${encodeURIComponent(schedName)}`); if (Array.isArray(sch.data) && sch.data.length > 0) await req.routerInstance.delete(`/system/scheduler/${sch.data[0]['.id']}`); await req.routerInstance.put(`/system/scheduler`, { name: schedName, 'start-date': rosDate, 'start-time': rosTime, interval: '0s', 'on-event': onEvent }); res.json({ message: 'Scheduler refreshed', name, schedName });
+        }
+    } catch (e) { const s = e.response ? e.response.status : 500; const m = e.response?.data?.message || e.response?.data?.detail || e.message; res.status(s).json({ message: m }); }
+});
+
+// Minimal Panel Roles API fallback (unblocks UI when proxy is unavailable)
+app.get('/api/roles', async (req, res) => {
+    try { const dbx = await getDb(); const rows = await dbx.all('SELECT id, name, description FROM roles'); res.json(rows); }
+    catch (e) { res.status(500).json({ message: e.message }); }
+});
+app.get('/api/permissions', async (req, res) => {
+    try { const dbx = await getDb(); const rows = await dbx.all('SELECT id, name, description FROM permissions'); res.json(rows); }
+    catch (e) { res.status(500).json({ message: e.message }); }
+});
+app.get('/api/panel-users', async (req, res) => {
+    try {
+        const dbx = await getDb();
+        const rows = await dbx.all(`SELECT u.id, u.username, r.id AS role_id, r.name AS role_name FROM users u LEFT JOIN roles r ON u.role_id = r.id`);
+        const mapped = rows.map(r => ({ id: r.id, username: r.username, role: { id: r.role_id, name: r.role_name || '' } }));
+        res.json(mapped);
+    } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// Create a new panel user
+app.post('/api/panel-users', async (req, res) => {
+    const { username, password, role_id } = req.body || {};
+    if (!username || !password || !role_id) {
+        return res.status(400).json({ message: 'Username, password, and role_id are required.' });
+    }
+    try {
+        const dbx = await getDb();
+        const role = await dbx.get('SELECT id FROM roles WHERE id = ?', [role_id]);
+        if (!role) {
+            return res.status(400).json({ message: 'Invalid role_id specified.' });
+        }
+        const hash = await bcrypt.hash(password, 10);
+        const id = `user_${Date.now()}`;
+        await dbx.run('INSERT INTO users (id, username, password, role_id) VALUES (?, ?, ?, ?)', [id, username, hash, role_id]);
+        const row = await dbx.get(`SELECT u.id, u.username, r.id AS role_id, r.name AS role_name FROM users u LEFT JOIN roles r ON u.role_id = r.id WHERE u.id = ?`, [id]);
+        res.status(201).json({ id: row.id, username: row.username, role: { id: row.role_id, name: row.role_name || '' } });
+    } catch (e) {
+        if (String(e.message).includes('UNIQUE')) {
+            return res.status(409).json({ message: 'Username already exists.' });
+        }
+        res.status(500).json({ message: e.message });
+    }
+});
+
+// Delete a panel user by id
+app.delete('/api/panel-users/:id', async (req, res) => {
+    try {
+        const dbx = await getDb();
+        const id = req.params.id;
+        const result = await dbx.run('DELETE FROM users WHERE id = ?', [id]);
+        if (result.changes === 0) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
+        res.status(204).send();
+    } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// Role permissions (fallback)
+app.get('/api/roles/:roleId/permissions', async (req, res) => {
+    try {
+        const dbx = await getDb();
+        const rows = await dbx.all(`SELECT permission_id FROM role_permissions WHERE role_id = ?`, [req.params.roleId]);
+        res.json(rows.map(r => r.permission_id));
+    } catch (e) { res.status(500).json({ message: e.message }); }
+});
+app.put('/api/roles/:roleId/permissions', async (req, res) => {
+    try {
+        const dbx = await getDb();
+        const ids = Array.isArray(req.body?.permissionIds) ? req.body.permissionIds : [];
+        await dbx.exec('BEGIN');
+        await dbx.run('DELETE FROM role_permissions WHERE role_id = ?', [req.params.roleId]);
+        for (const pid of ids) { await dbx.run('INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)', [req.params.roleId, pid]); }
+        await dbx.exec('COMMIT');
+        res.json({ success: true });
+    } catch (e) { try { const dbx = await getDb(); await dbx.exec('ROLLBACK'); } catch {} res.status(500).json({ message: e.message }); }
+});
+
+app.get('/captive/info', async (req, res) => {
+    try {
+        const dbx = await getDb();
+        const routers = await dbx.all('SELECT * FROM routers');
+        let ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || '').trim();
+        if (ip.includes(',')) ip = ip.split(',')[0].trim();
+        ip = ip.replace('::ffff:', '').replace(/^::1$/, '127.0.0.1');
+        const nowIso = new Date().toISOString();
+        let result = null;
+        for (const router of routers) {
+            try {
+                const instance = createRouterInstance(router);
+                if (router.api_type === 'legacy') {
+                    await instance.connect();
+                    try {
+                        const pend = await writeLegacySafe(instance, ['/ip/firewall/address-list/print', `?address=${ip}`, '?list=pending-dhcp-users']);
+                        if (Array.isArray(pend) && pend.length > 0) {
+                            const lease = await writeLegacySafe(instance, ['/ip/dhcp-server/lease/print', `?address=${ip}`]);
+                            const mac = Array.isArray(lease) && lease.length > 0 ? lease[0]['mac-address'] || null : null;
+                            const host = Array.isArray(lease) && lease.length > 0 ? lease[0]['host-name'] || null : null;
+                            result = { status: 'expired', ip, macAddress: mac, hostName: host, routerId: router.id };
+                        } else {
+                            const auth = await writeLegacySafe(instance, ['/ip/firewall/address-list/print', `?address=${ip}`, '?list=authorized-dhcp-users']);
+                            if (Array.isArray(auth) && auth.length > 0) {
+                                let due = null, plan = null;
+                                try {
+                                    const meta = JSON.parse(String(auth[0].comment || '{}'));
+                                    due = meta.dueDateTime || meta.dueDate || null;
+                                    plan = meta.planName || null;
+                                } catch (_) {}
+                                if (due && new Date(due).toISOString() <= nowIso) {
+                                    result = { status: 'expired', ip, dueDateTime: due, planName: plan, routerId: router.id };
+                                } else {
+                                    result = { status: 'authorized', ip, dueDateTime: due, planName: plan, routerId: router.id };
+                                }
+                            }
+                        }
+                    } finally { await instance.close(); }
+                } else {
+                    const pendRes = await instance.get(`/ip/firewall/address-list?address=${encodeURIComponent(ip)}&list=pending-dhcp-users`);
+                    if (Array.isArray(pendRes.data) && pendRes.data.length > 0) {
+                        const leaseRes = await instance.get(`/ip/dhcp-server/lease?address=${encodeURIComponent(ip)}`);
+                        const l = Array.isArray(leaseRes.data) && leaseRes.data.length > 0 ? leaseRes.data[0] : null;
+                        const mac = l ? l['mac-address'] || null : null;
+                        const host = l ? l['host-name'] || null : null;
+                        result = { status: 'expired', ip, macAddress: mac, hostName: host, routerId: router.id };
+                    } else {
+                        const authRes = await instance.get(`/ip/firewall/address-list?address=${encodeURIComponent(ip)}&list=authorized-dhcp-users`);
+                        if (Array.isArray(authRes.data) && authRes.data.length > 0) {
+                            let due = null, plan = null;
+                            try {
+                                const meta = JSON.parse(String(authRes.data[0].comment || '{}'));
+                                due = meta.dueDateTime || meta.dueDate || null;
+                                plan = meta.planName || null;
+                            } catch (_) {}
+                            if (due && new Date(due).toISOString() <= nowIso) {
+                                result = { status: 'expired', ip, dueDateTime: due, planName: plan, routerId: router.id };
+                            } else {
+                                result = { status: 'authorized', ip, dueDateTime: due, planName: plan, routerId: router.id };
+                            }
+                        }
+                    }
+                }
+                if (result) break;
+            } catch (_) {}
+        }
+        if (!result) {
+            res.json({ status: 'unknown', ip });
+        } else {
+            res.json(result);
+        }
+    } catch (e) {
+        const s = e.response ? e.response.status : 500;
+        const m = e.response?.data?.message || e.response?.data?.detail || e.message;
+        res.status(s).json({ message: m });
+    }
+});
+
+// DHCP Portal Setup
+app.post('/:routerId/script/run-dhcp-portal-setup', getRouter, async (req, res) => {
+    const { panelIp, lanInterface } = req.body;
+    if (!panelIp || !lanInterface) return res.status(400).json({ message: 'Missing panelIp or lanInterface' });
+
+    try {
+        const SCRIPT_NAME = 'dhcp-lease-add-to-pending';
+        const LIST_NAME = 'authorized-dhcp-users';
+        const COMMENT_TAG = 'DHCP-PORTAL';
+
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance;
+            await client.connect();
+            try {
+                // 1. Create Script
+                const scripts = await writeLegacySafe(client, ['/system/script/print', '?name=' + SCRIPT_NAME]);
+                if (scripts.length === 0) {
+                    await client.write('/system/script/add', {
+                        name: SCRIPT_NAME,
+                        source: ':log info "DHCP Lease assigned (Portal Managed)"',
+                        comment: COMMENT_TAG
+                    });
+                }
+
+                // 2. Configure DHCP Server
+                const servers = await writeLegacySafe(client, ['/ip/dhcp-server/print', '?interface=' + lanInterface]);
+                if (servers.length > 0) {
+                    await client.write('/ip/dhcp-server/set', {
+                        '.id': servers[0]['.id'],
+                        'lease-script': SCRIPT_NAME
+                    });
+                } else {
+                    throw new Error(`No DHCP Server found on interface ${lanInterface}`);
+                }
+
+                // 3. Firewall NAT (Redirect)
+                const natRules = await writeLegacySafe(client, ['/ip/firewall/nat/print', '?comment=' + COMMENT_TAG + '-REDIRECT']);
+                if (natRules.length === 0) {
+                    await client.write('/ip/firewall/nat/add', {
+                        chain: 'dstnat',
+                        protocol: 'tcp',
+                        'dst-port': '80',
+                        'in-interface': lanInterface,
+                        'src-address-list': '!' + LIST_NAME,
+                        action: 'dst-nat',
+                        'to-addresses': panelIp,
+                        'to-ports': '80',
+                        comment: COMMENT_TAG + '-REDIRECT',
+                        'place-before': 0
+                    });
+                }
+
+                // 4. Firewall Filter Rules
+                const dnsRules = await writeLegacySafe(client, ['/ip/firewall/filter/print', '?comment=' + COMMENT_TAG + '-DNS']);
+                if (dnsRules.length === 0) {
+                    await client.write('/ip/firewall/filter/add', {
+                        chain: 'forward',
+                        protocol: 'udp',
+                        'dst-port': '53',
+                        'in-interface': lanInterface,
+                        action: 'accept',
+                        comment: COMMENT_TAG + '-DNS',
+                        'place-before': 0
+                    });
+                }
+                
+                const authRules = await writeLegacySafe(client, ['/ip/firewall/filter/print', '?comment=' + COMMENT_TAG + '-AUTH']);
+                if (authRules.length === 0) {
+                    await client.write('/ip/firewall/filter/add', {
+                        chain: 'forward',
+                        'in-interface': lanInterface,
+                        'src-address-list': LIST_NAME,
+                        action: 'accept',
+                        comment: COMMENT_TAG + '-AUTH'
+                    });
+                }
+
+                const panelRules = await writeLegacySafe(client, ['/ip/firewall/filter/print', '?comment=' + COMMENT_TAG + '-PANEL']);
+                if (panelRules.length === 0) {
+                     await client.write('/ip/firewall/filter/add', {
+                        chain: 'forward',
+                        'dst-address': panelIp,
+                        action: 'accept',
+                        comment: COMMENT_TAG + '-PANEL'
+                     });
+                }
+
+                const dropRules = await writeLegacySafe(client, ['/ip/firewall/filter/print', '?comment=' + COMMENT_TAG + '-DROP']);
+                if (dropRules.length === 0) {
+                    await client.write('/ip/firewall/filter/add', {
+                        chain: 'forward',
+                        'in-interface': lanInterface,
+                        'src-address-list': '!' + LIST_NAME,
+                        action: 'drop',
+                        comment: COMMENT_TAG + '-DROP'
+                    });
+                }
+
+            } finally {
+                await client.close();
+            }
+        } else {
+            // REST API
+            const instance = req.routerInstance;
+            
+            const sRes = await instance.get(`/system/script?name=${SCRIPT_NAME}`);
+            if (!sRes.data || sRes.data.length === 0) {
+                await instance.put('/system/script', {
+                    name: SCRIPT_NAME,
+                    source: ':log info "DHCP Lease assigned (Portal Managed)"',
+                    comment: COMMENT_TAG
+                });
+            }
+
+            const dRes = await instance.get(`/ip/dhcp-server?interface=${lanInterface}`);
+            if (dRes.data && dRes.data.length > 0) {
+                await instance.patch(`/ip/dhcp-server/${dRes.data[0]['.id']}`, { 'lease-script': SCRIPT_NAME });
+            } else {
+                throw new Error(`No DHCP Server found on interface ${lanInterface}`);
+            }
+
+            const natRes = await instance.get(`/ip/firewall/nat?comment=${COMMENT_TAG}-REDIRECT`);
+            if (!natRes.data || natRes.data.length === 0) {
+                await instance.put('/ip/firewall/nat', {
+                    chain: 'dstnat',
+                    protocol: 'tcp',
+                    'dst-port': '80',
+                    'in-interface': lanInterface,
+                    'src-address-list': '!' + LIST_NAME,
+                    action: 'dst-nat',
+                    'to-addresses': panelIp,
+                    'to-ports': '80',
+                    comment: COMMENT_TAG + '-REDIRECT',
+                    'place-before': '*0'
+                });
+            }
+
+            const dnsRes = await instance.get(`/ip/firewall/filter?comment=${COMMENT_TAG}-DNS`);
+            if (!dnsRes.data || dnsRes.data.length === 0) {
+                 await instance.put('/ip/firewall/filter', {
+                    chain: 'forward',
+                    protocol: 'udp',
+                    'dst-port': '53',
+                    'in-interface': lanInterface,
+                    action: 'accept',
+                    comment: COMMENT_TAG + '-DNS',
+                    'place-before': '*0'
+                });
+            }
+
+            const authRes = await instance.get(`/ip/firewall/filter?comment=${COMMENT_TAG}-AUTH`);
+            if (!authRes.data || authRes.data.length === 0) {
+                 await instance.put('/ip/firewall/filter', {
+                    chain: 'forward',
+                    'in-interface': lanInterface,
+                    'src-address-list': LIST_NAME,
+                    action: 'accept',
+                    comment: COMMENT_TAG + '-AUTH'
+                });
+            }
+
+            const panelRes = await instance.get(`/ip/firewall/filter?comment=${COMMENT_TAG}-PANEL`);
+            if (!panelRes.data || panelRes.data.length === 0) {
+                 await instance.put('/ip/firewall/filter', {
+                    chain: 'forward',
+                    'dst-address': panelIp,
+                    action: 'accept',
+                    comment: COMMENT_TAG + '-PANEL'
+                });
+            }
+
+            const dropRes = await instance.get(`/ip/firewall/filter?comment=${COMMENT_TAG}-DROP`);
+            if (!dropRes.data || dropRes.data.length === 0) {
+                 await instance.put('/ip/firewall/filter', {
+                    chain: 'forward',
+                    'in-interface': lanInterface,
+                    'src-address-list': '!' + LIST_NAME,
+                    action: 'drop',
+                    comment: COMMENT_TAG + '-DROP'
+                });
+            }
+        }
+
+        res.json({ message: 'Portal components installed successfully' });
+    } catch (e) {
+        console.error("Portal Setup Error:", e.message);
+        res.status(500).json({ message: e.message });
+    }
+});
+
+// DHCP Portal Uninstall
+app.post('/:routerId/script/run-dhcp-portal-uninstall', getRouter, async (req, res) => {
+     try {
+        const COMMENT_TAG = 'DHCP-PORTAL';
+        const SCRIPT_NAME = 'dhcp-lease-add-to-pending';
+
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance;
+            await client.connect();
+            try {
+                const tags = ['-REDIRECT', '-DNS', '-AUTH', '-PANEL', '-DROP'];
+                for (const tag of tags) {
+                    const type = tag === '-REDIRECT' ? 'nat' : 'filter';
+                    const list = await writeLegacySafe(client, [`/ip/firewall/${type}/print`, `?comment=${COMMENT_TAG}${tag}`]);
+                    for (const item of list) {
+                        await client.write(`/ip/firewall/${type}/remove`, { '.id': item['.id'] });
+                    }
+                }
+
+                const servers = await writeLegacySafe(client, ['/ip/dhcp-server/print', `?lease-script=${SCRIPT_NAME}`]);
+                for (const s of servers) {
+                    await client.write('/ip/dhcp-server/set', { '.id': s['.id'], 'lease-script': '' });
+                }
+
+                const scripts = await writeLegacySafe(client, ['/system/script/print', `?name=${SCRIPT_NAME}`]);
+                for (const s of scripts) {
+                    await client.write('/system/script/remove', { '.id': s['.id'] });
+                }
+
+            } finally {
+                await client.close();
+            }
+        } else {
+            const instance = req.routerInstance;
+            const tags = ['-REDIRECT', '-DNS', '-AUTH', '-PANEL', '-DROP'];
+            for (const tag of tags) {
+                const type = tag === '-REDIRECT' ? 'nat' : 'filter';
+                const list = await instance.get(`/ip/firewall/${type}?comment=${COMMENT_TAG}${tag}`);
+                if (list.data) {
+                    for (const item of list.data) {
+                        await instance.delete(`/ip/firewall/${type}/${item['.id']}`);
+                    }
+                }
+            }
+
+             const servers = await instance.get(`/ip/dhcp-server?lease-script=${SCRIPT_NAME}`);
+             if (servers.data) {
+                for (const s of servers.data) {
+                    await instance.patch(`/ip/dhcp-server/${s['.id']}`, { 'lease-script': '' });
+                }
+             }
+
+             const scripts = await instance.get(`/system/script?name=${SCRIPT_NAME}`);
+             if (scripts.data) {
+                for (const s of scripts.data) {
+                    await instance.delete(`/system/script/${s['.id']}`);
+                }
+             }
+        }
+        res.json({ message: 'Portal components uninstalled successfully' });
+     } catch (e) {
+        console.error("Portal Uninstall Error:", e.message);
+        res.status(500).json({ message: e.message });
+     }
+});
+
+// Forward /api/* calls to Panel UI server to avoid redirect loops
+app.all('/api/*', async (req, res) => {
+    try {
+        const target = `http://127.0.0.1:3001${req.originalUrl}`;
+        const axiosResp = await axios({ method: req.method, url: target, data: req.body, headers: { authorization: req.headers.authorization, 'content-type': req.headers['content-type'] || 'application/json' }, timeout: 15000 });
+        res.status(axiosResp.status).send(axiosResp.data);
+    } catch (e) {
+        const status = e.response ? e.response.status : 502;
+        const msg = e.response?.data?.message || e.message;
+        res.status(status).json({ message: msg });
+    }
+});
+
+app.post('/:routerId/file/get-content', getRouter, async (req, res) => {
+    const id = req.body?.['.id'] || req.body?.id;
+    if (!id) return res.status(400).json({ message: '.id is required' });
+    try {
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance;
+            await client.connect();
+            try {
+                const result = await writeLegacySafe(client, ['/file/get', `=.id=${id}`, '=value-name=contents']);
+                let contents = '';
+                if (Array.isArray(result) && result.length > 0) {
+                    const r = result.find(x => typeof x === 'object');
+                    contents = (r && (r.ret || r.value || r.contents || r.data)) || '';
+                } else if (result && typeof result === 'object') {
+                    contents = result.ret || result.value || result.contents || result.data || '';
+                }
+                res.json({ contents });
+            } finally {
+                await client.close();
+            }
+        } else {
+            const instance = req.routerInstance;
+            const response = await instance.post('/file/get', { '.id': id, '.proplist': 'contents' });
+            let contents = '';
+            const data = response.data;
+            if (Array.isArray(data) && data.length > 0) {
+                contents = data[0]?.contents || data[0]?.ret || '';
+            } else if (data && typeof data === 'object') {
+                contents = data.contents || data.ret || '';
+            }
+            res.json({ contents });
+        }
+    } catch (e) {
+        const s = e.response ? e.response.status : 500;
+        const m = e.response?.data?.message || e.response?.data?.detail || e.message;
+        res.status(s).json({ message: m });
+    }
+});
+
+// 3. Generic Proxy Handler for all other MikroTik calls
+app.all('/:routerId/:endpoint(*)', getRouter, async (req, res) => {
+    const { endpoint } = req.params;
+    const method = req.method;
+    const body = req.body;
+
+    try {
+        if (req.router.api_type === 'legacy') {
+            const client = req.routerInstance;
+            await client.connect();
+
+            const cmd = '/' + endpoint;
+
+            if (method === 'POST' && body) {
+                await client.write(cmd, body);
+                res.json({ message: 'Command executed' });
+            } else {
+                const data = await writeLegacySafe(client, [cmd]);
+                res.json(data.map(normalizeLegacyObject));
+            }
+            await client.close();
+        } else {
+            // REST API translation layer for legacy-style endpoints
+            const instance = req.routerInstance;
+
+            const translateToRest = (ep, m, b) => {
+                const parts = ep.split('/').filter(Boolean);
+                const last = parts[parts.length - 1];
+                let restMethod = m.toUpperCase();
+                let restUrl = '/' + parts.join('/');
+                let restData = b;
+
+                if (last === 'print') {
+                    parts.pop();
+                    restUrl = '/' + parts.join('/');
+                    restMethod = 'GET';
+                    restData = undefined;
+                } else if (last === 'add') {
+                    parts.pop();
+                    restUrl = '/' + parts.join('/');
+                    restMethod = 'PUT';
+                } else if (last === 'set') {
+                    parts.pop();
+                    const id = b?.['.id'] || b?.id;
+                    if (!id) throw new Error('Missing .id for set operation');
+                    restUrl = '/' + parts.join('/') + '/' + id;
+                    restMethod = 'PATCH';
+                    // Remove legacy id field
+                    if (restData?.['.id']) delete restData['.id'];
+                } else if (last === 'remove') {
+                    parts.pop();
+                    const id = b?.['.id'] || b?.id;
+                    if (!id) throw new Error('Missing .id for remove operation');
+                    restUrl = '/' + parts.join('/') + '/' + id;
+                    restMethod = 'DELETE';
+                    restData = undefined;
+                }
+
+                return { restMethod, restUrl, restData };
+            };
+
+            const { restMethod, restUrl, restData } = translateToRest(endpoint, method, body);
+
+            // Forward query parameters from the incoming request to the MikroTik REST API
+            const queryParams = new URLSearchParams(req.query).toString();
+            const finalUrl = queryParams ? `${restUrl}?${queryParams}` : restUrl;
+
+            console.log(`[REST Proxy] ${restMethod} ${finalUrl}`);
+
+            try {
+                const response = await instance.request({
+                    method: restMethod,
+                    url: finalUrl,
+                    data: restData
+                });
+                res.json(response.data);
+            } catch (err) {
+                if (restMethod === 'PUT') {
+                    const fallback = await instance.request({
+                        method: 'POST',
+                        url: restUrl,
+                        data: restData
+                    });
+                    res.json(fallback.data);
+                } else {
+                    throw err;
+                }
+            }
+        }
+    } catch (e) {
+        const bodyKeys = body && typeof body === 'object' ? Object.keys(body) : [];
+        console.error('[Proxy Error]', safeStringify({ endpoint, method, routerId: req.params.routerId, bodyKeys, message: e.message, status: e.response?.status, data: e.response?.data }));
+        const status = e.response ? e.response.status : 500;
+        const msg = e.response?.data?.message || e.response?.data?.detail || e.message;
+        res.status(status).json({ message: msg });
+    }
+});
+
+let graceWorkerRunning = false;
+const processExpiredGrace = async () => {
+    if (graceWorkerRunning) return; graceWorkerRunning = true;
+    try {
+        const database = await getDb();
+        const nowIso = new Date().toISOString();
+        const rows = await database.all('SELECT * FROM ppp_grace WHERE expires_at <= ?', [nowIso]);
+        for (const row of rows) {
+            try {
+                const router = await database.get('SELECT * FROM routers WHERE id = ?', [row.router_id]);
+                if (!router) continue;
+                const instance = createRouterInstance(router);
+                const nameEnc = encodeURIComponent(String(row.name));
+                if (router.api_type === 'legacy') {
+                    await instance.connect();
+                    try {
+                        const s = await writeLegacySafe(instance, ['/ppp/secret/print', `?name=${String(row.name)}`]);
+                        if (Array.isArray(s) && s.length > 0 && row.non_payment_profile) {
+                            await instance.write('/ppp/secret/set', { '.id': s[0]['.id'], profile: String(row.non_payment_profile) });
+                        }
+                        const active = await writeLegacySafe(instance, ['/ppp/active/print', `?name=${String(row.name)}`]);
+                        if (Array.isArray(active) && active.length > 0) {
+                            await instance.write('/ppp/active/remove', { '.id': active[0]['.id'] });
+                        }
+                        const sched = await writeLegacySafe(instance, ['/system/scheduler/print', `?name=ppp-grace-expire-${String(row.name)}`]);
+                        if (Array.isArray(sched) && sched.length > 0) await instance.write('/system/scheduler/remove', { '.id': sched[0]['.id'] });
+                    } finally { await instance.close(); }
+                } else {
+                    const sRes = await instance.get(`/ppp/secret?name=${nameEnc}`);
+                    if (Array.isArray(sRes.data) && sRes.data.length > 0 && row.non_payment_profile) {
+                        await instance.patch(`/ppp/secret/${sRes.data[0]['.id']}`, { profile: String(row.non_payment_profile) });
+                    }
+                    try {
+                        const activeRes = await instance.get(`/ppp/active?name=${nameEnc}`);
+                        if (Array.isArray(activeRes.data) && activeRes.data.length > 0) {
+                             await instance.delete(`/ppp/active/${activeRes.data[0]['.id']}`);
+                        }
+                    } catch (e) { console.warn('[ppp/grace/expire] REST active remove failed:', e.message); }
+                    const sch = await instance.get(`/system/scheduler?name=${encodeURIComponent(`ppp-grace-expire-${String(row.name)}`)}`);
+                    if (Array.isArray(sch.data) && sch.data.length > 0) await instance.delete(`/system/scheduler/${sch.data[0]['.id']}`);
+                }
+                await database.run('DELETE FROM ppp_grace WHERE router_id = ? AND name = ?', [row.router_id, String(row.name)]);
+                console.log('[ppp/grace/expire] applied non-payment profile and cleaned record', row.router_id, row.name);
+            } catch (err) { console.error('[ppp/grace/expire] error', err.message); }
+        }
+    } catch (e) { console.error('[ppp/grace/worker] error', e.message); }
+    finally { graceWorkerRunning = false; }
+};
+setInterval(processExpiredGrace, 60000);
+
+
+// Global error handler to catch JSON/body parse errors (e.g. request aborted)
+app.use((err, req, res, next) => {
+    if (err && err.type === 'request.aborted') {
+        console.warn('[Request Aborted]', req.method, req.url);
+        return;
+    }
+    if (err && err.type === 'entity.too.large') {
+        return res.status(413).json({ message: 'Request body too large' });
+    }
+    console.error('[Express Error]', err);
+    res.status(500).json({ message: 'Internal Server Error' });
+});
+
+const server = app.listen(PORT, () => {
+    console.log(`MikroTik API Backend listening on port ${PORT}`);
+});
+
+const wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (request, socket, head) => {
+    try {
+        const url = new URL(request.url, `http://${request.headers.host}`);
+        if (url.pathname === '/ws/ssh') {
+            wss.handleUpgrade(request, socket, head, (ws) => {
+                wss.emit('connection', ws, request);
+            });
+        } else {
+            socket.destroy();
+        }
+    } catch (_) {
+        socket.destroy();
+    }
+});
+
+wss.on('connection', (ws) => {
+    let ssh;
+    let shellStream;
+    let cols = 80;
+    let rows = 24;
+
+    const cleanUp = () => {
+        try { if (shellStream) shellStream.close(); } catch (_) {}
+        try { if (ssh) ssh.end(); } catch (_) {}
+        shellStream = null;
+        ssh = null;
+    };
+
+    ws.on('message', (message) => {
+        let payload;
+        try {
+            payload = JSON.parse(message.toString());
+        } catch (_) {
+            return;
+        }
+
+        if (!payload || typeof payload !== 'object') return;
+
+        if (payload.type === 'auth') {
+            const data = payload.data || {};
+            const host = String(data.host || '');
+            const username = String(data.user || '');
+            const password = String(data.password || '');
+            cols = Number(data.term_cols || cols) || cols;
+            rows = Number(data.term_rows || rows) || rows;
+
+            if (!host || !username) {
+                ws.send('\r\nInvalid SSH credentials\r\n');
+                ws.close();
+                return;
+            }
+
+            ssh = new SSHClient();
+            ssh.on('ready', () => {
+                ssh.shell({ term: 'xterm-color', cols, rows }, (err, stream) => {
+                    if (err) {
+                        ws.send(`\r\nSSH shell error: ${err.message}\r\n`);
+                        ws.close();
+                        return;
+                    }
+                    shellStream = stream;
+                    stream.on('data', (data) => {
+                        try { ws.send(data.toString('utf8')); } catch (_) {}
+                    });
+                    stream.on('close', () => {
+                        cleanUp();
+                        try { ws.close(); } catch (_) {}
+                    });
+                    stream.stderr?.on('data', (data) => {
+                        try { ws.send(data.toString('utf8')); } catch (_) {}
+                    });
+                });
+            });
+            ssh.on('error', (err) => {
+                try { ws.send(`\r\nSSH connection error: ${err.message}\r\n`); } catch (_) {}
+                cleanUp();
+            });
+            ssh.on('end', () => {
+                cleanUp();
+                try { ws.close(); } catch (_) {}
+            });
+
+            ssh.connect({
+                host,
+                port: 22,
+                username,
+                password,
+                readyTimeout: 15000
+            });
+        } else if (payload.type === 'data') {
+            const data = String(payload.data || '');
+            if (shellStream && data) {
+                try { shellStream.write(data); } catch (_) {}
+            }
+        } else if (payload.type === 'resize') {
+            cols = Number(payload.cols || cols) || cols;
+            rows = Number(payload.rows || rows) || rows;
+            if (shellStream && shellStream.setWindow) {
+                try { shellStream.setWindow(rows, cols, 0, 0); } catch (_) {}
+            }
+        }
+    });
+
+    ws.on('close', () => {
+        cleanUp();
+    });
+    ws.on('error', () => {
+        cleanUp();
+    });
+});
