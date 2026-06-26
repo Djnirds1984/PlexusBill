@@ -1498,6 +1498,51 @@ async function startServer() {
         }
     });
 
+    // POST /api/tenants/find-user - Find which tenant a user belongs to
+    app.post('/api/tenants/find-user', async (req, res) => {
+        const { username } = req.body;
+        
+        try {
+            // Get all active and approved tenants
+            const tenants = await superadminDb.all(
+                'SELECT id, slug, database_path FROM tenants WHERE status = ? AND approval_status = ?',
+                'active', 'approved'
+            );
+            
+            // Search for user in each tenant's database
+            for (const tenant of tenants) {
+                try {
+                    const tenantDb = await getTenantDb(tenant.id, superadminDb);
+                    
+                    const user = await tenantDb.get(
+                        'SELECT id, username, role_id FROM users WHERE username = ?',
+                        username
+                    );
+                    
+                    if (user) {
+                        console.log(`[Find User] Found user ${username} in tenant: ${tenant.slug}`);
+                        return res.json({
+                            found: true,
+                            tenantId: tenant.id,
+                            tenantSlug: tenant.slug,
+                            userId: user.id
+                        });
+                    }
+                } catch (err) {
+                    // Skip tenants with database errors
+                    console.log(`[Find User] Error checking tenant ${tenant.slug}:`, err.message);
+                }
+            }
+            
+            res.status(404).json({ 
+                error: 'User not found in any tenant. Please check your username or contact support.' 
+            });
+        } catch (err) {
+            console.error('[Find User Error]', err);
+            res.status(500).json({ error: 'Failed to find user' });
+        }
+    });
+
     // --- API ROUTES ---
     
     // Authentication

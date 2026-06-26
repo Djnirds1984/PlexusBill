@@ -510,17 +510,15 @@ const AppRouter: React.FC = () => {
     }
 
     if (!user) {
-        // Check for tenant login route
-        if (path.startsWith('/tenant/') && path.endsWith('/login')) {
-            // Extract tenant slug from path: /tenant/{slug}/login
-            const pathParts = path.split('/');
-            const tenantSlug = pathParts[2];
-            
+        // Check for superadmin login route
+        if (path === '/superadmin/login' || path === '/superadmin') {
             return (
                 <ThemeProvider>
                     <LocalizationProvider>
                         <Suspense fallback={<div className="flex h-screen w-screen items-center justify-center"><Loader /></div>}>
-                            <TenantLogin />
+                            <AuthLayout>
+                                <Login onSwitchToForgotPassword={() => setAuthView('forgot')} onSwitchToTenantRegister={() => {}} isSuperAdmin={true} />
+                            </AuthLayout>
                         </Suspense>
                     </LocalizationProvider>
                 </ThemeProvider>
