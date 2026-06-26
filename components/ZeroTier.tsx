@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type { ZeroTierNetwork, ZeroTierInfo } from '../types.ts';
-import { getZeroTierStatus, joinZeroTierNetwork, leaveZeroTierNetwork, setZeroTierNetworkSetting, streamInstallZeroTier, restartZeroTierService } from '../services/zeroTierPanelService.ts';
+import { getZeroTierStatus, joinZeroTierNetwork, leaveZeroTierNetwork, setZeroTierNetworkSetting, streamInstallZeroTier, restartZeroTierService, deepCleanAndRejoin, runZeroTierDiagnostics, reauthorizeMember } from '../services/zeroTierPanelService.ts';
 import { Loader } from './Loader.tsx';
 import { TrashIcon, ZeroTierIcon, ExclamationTriangleIcon, CheckCircleIcon, UpdateIcon } from '../constants.tsx';
 import { CodeBlock } from './CodeBlock.tsx';
@@ -105,6 +105,10 @@ export const ZeroTier: React.FC = () => {
     const installTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const [isRestarting, setIsRestarting] = useState(false);
     const [restartMessage, setRestartMessage] = useState<string | null>(null);
+    const [isDeepCleaning, setIsDeepCleaning] = useState(false);
+    const [deepCleanSteps, setDeepCleanSteps] = useState<string[]>([]);
+    const [isRunningDiagnostics, setIsRunningDiagnostics] = useState(false);
+    const [diagnosticsResults, setDiagnosticsResults] = useState<any>(null);
 
 
     const fetchData = useCallback(async () => {
@@ -188,10 +192,28 @@ export const ZeroTier: React.FC = () => {
             const result = await joinZeroTierNetwork(networkId);
             console.log('[ZeroTier] Join result:', result);
             setIsModalOpen(false);
-            // Wait longer for ZeroTier to get configuration from controller
-            setTimeout(fetchData, 2000);
-            // Refresh again after 5 seconds to catch delayed configuration
-            setTimeout(fetchData, 5000);
+            setRestartMessage(`✅ Join command sent! Waiting for network configuration (polling every 3 seconds for 60s)...`);
+            
+            // Start polling every 3 seconds for 60 seconds
+            let pollCount = 0;
+            const maxPolls = 20; // 20 * 3s = 60s
+            const pollInterval = setInterval(async () => {
+                pollCount++;
+                const currentData = await getZeroTierStatus();
+                console.log(`[ZeroTier] Poll ${pollCount}/${maxPolls} - checking for network...`);
+                
+                // Stop polling if we found networks or reached max
+                if (pollCount >= maxPolls || (currentData.networks && currentData.networks.length > 0)) {
+                    clearInterval(pollInterval);
+                    if (currentData.networks && currentData.networks.length > 0) {
+                        setRestartMessage(`✅ Network connected after ${pollCount * 3} seconds!`);
+                        setData(currentData);
+                    } else {
+                        setRestartMessage(`⚠️ 60 seconds elapsed. If network still doesn't appear, use "Deep Clean & Rejoin" or "Run Diagnostics".`);
+                    }
+                }
+            }, 3000);
+            
         } catch (err) {
             console.error('[ZeroTier] Join error:', err);
             alert(`Error joining network: ${(err as Error).message}`);
@@ -220,6 +242,50 @@ export const ZeroTier: React.FC = () => {
         } catch (err) {
             setRestartMessage(`❌ Failed to restart: ${(err as Error).message}`);
             setIsRestarting(false);
+        }
+    };
+
+    const handleDeepCleanRejoin = async () => {
+        const networkId = prompt('Enter ZeroTier Network ID to rejoin:');
+        if (!networkId) return;
+        
+        if (!window.confirm(`⚠️ This will:\n1. Stop ZeroTier service\n2. Clear all network configs\n3. Restart ZeroTier\n4. Rejoin network ${networkId}\n5. Wait 20 seconds for authorization\n\nContinue?`)) {
+            return;
+        }
+        
+        setIsDeepCleaning(true);
+        setDeepCleanSteps([]);
+        setErrorMessage('');
+        
+        try {
+            const result = await deepCleanAndRejoin(networkId);
+            setDeepCleanSteps(result.steps);
+            
+            if (result.networks && result.networks.length > 0) {
+                setErrorMessage(`✅ SUCCESS! Network ${networkId} joined successfully!`);
+                await fetchData();
+            } else {
+                setErrorMessage(`⚠️ Clean/rejoin completed but network not yet visible. Please authorize member in ZeroTier Central if not already done.`);
+            }
+        } catch (err) {
+            setErrorMessage(`❌ Deep clean failed: ${(err as Error).message}`);
+        } finally {
+            setIsDeepCleaning(false);
+        }
+    };
+
+    const handleDiagnostics = async () => {
+        setIsRunningDiagnostics(true);
+        setDiagnosticsResults(null);
+        setErrorMessage('');
+        
+        try {
+            const result = await runZeroTierDiagnostics();
+            setDiagnosticsResults(result.results);
+        } catch (err) {
+            setErrorMessage(`❌ Diagnostics failed: ${(err as Error).message}`);
+        } finally {
+            setIsRunningDiagnostics(false);
         }
     };
 
@@ -399,7 +465,7 @@ export const ZeroTier: React.FC = () => {
                         <h2 className="text-3xl font-bold text-slate-900 dark:text-slate-100">ZeroTier Panel Management</h2>
                         <p className="text-slate-500 dark:text-slate-400 mt-1">Manage the ZeroTier service running on this panel's host.</p>
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 flex-wrap">
                         <button 
                             onClick={handleRestartService} 
                             disabled={isRestarting}
@@ -407,6 +473,22 @@ export const ZeroTier: React.FC = () => {
                         >
                             <UpdateIcon className="w-5 h-5" />
                             {isRestarting ? 'Restarting...' : 'Restart Service'}
+                        </button>
+                        <button 
+                            onClick={handleDeepCleanRejoin} 
+                            disabled={isDeepCleaning}
+                            className="bg-orange-600 hover:bg-orange-500 disabled:bg-orange-400 text-white font-bold py-2 px-4 rounded-lg self-start sm:self-center flex items-center gap-2"
+                        >
+                            <UpdateIcon className="w-5 h-5" />
+                            {isDeepCleaning ? 'Cleaning...' : 'Deep Clean & Rejoin'}
+                        </button>
+                        <button 
+                            onClick={handleDiagnostics} 
+                            disabled={isRunningDiagnostics}
+                            className="bg-blue-600 hover:bg-blue-500 disabled:bg-blue-400 text-white font-bold py-2 px-4 rounded-lg self-start sm:self-center flex items-center gap-2"
+                        >
+                            <UpdateIcon className="w-5 h-5" />
+                            {isRunningDiagnostics ? 'Running...' : 'Run Diagnostics'}
                         </button>
                         <button onClick={() => setIsModalOpen(true)} className="bg-[--color-primary-600] hover:bg-[--color-primary-500] text-white font-bold py-2 px-4 rounded-lg self-start sm:self-center">
                             Join Network
@@ -423,6 +505,51 @@ export const ZeroTier: React.FC = () => {
                             : 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-700 text-blue-700 dark:text-blue-300'
                     }`}>
                         {restartMessage}
+                    </div>
+                )}
+
+                {/* Deep Clean Steps */}
+                {deepCleanSteps.length > 0 && (
+                    <div className="p-4 rounded-lg border bg-slate-50 dark:bg-slate-900/50 border-slate-200 dark:border-slate-700">
+                        <h4 className="font-semibold text-slate-900 dark:text-slate-100 mb-2">Deep Clean & Rejoin Progress:</h4>
+                        <ol className="list-decimal list-inside space-y-1 text-sm text-slate-700 dark:text-slate-300 font-mono">
+                            {deepCleanSteps.map((step, idx) => (
+                                <li key={idx}>{step}</li>
+                            ))}
+                        </ol>
+                    </div>
+                )}
+
+                {/* Diagnostics Results */}
+                {diagnosticsResults && (
+                    <div className="p-4 rounded-lg border bg-slate-50 dark:bg-slate-900/50 border-slate-200 dark:border-slate-700">
+                        <h4 className="font-semibold text-slate-900 dark:text-slate-100 mb-2">ZeroTier Diagnostics:</h4>
+                        <div className="space-y-4">
+                            <div>
+                                <div className="text-sm font-medium text-slate-600 dark:text-slate-400 mb-1">Status:</div>
+                                <pre className="text-xs bg-slate-100 dark:bg-slate-800 p-2 rounded overflow-x-auto font-mono">{diagnosticsResults.status}</pre>
+                            </div>
+                            <div>
+                                <div className="text-sm font-medium text-slate-600 dark:text-slate-400 mb-1">Networks:</div>
+                                <pre className="text-xs bg-slate-100 dark:bg-slate-800 p-2 rounded overflow-x-auto font-mono">{diagnosticsResults.networks}</pre>
+                            </div>
+                            <div>
+                                <div className="text-sm font-medium text-slate-600 dark:text-slate-400 mb-1">Networks Directory:</div>
+                                <pre className="text-xs bg-slate-100 dark:bg-slate-800 p-2 rounded overflow-x-auto font-mono">{diagnosticsResults.networksDir}</pre>
+                            </div>
+                            <div>
+                                <div className="text-sm font-medium text-slate-600 dark:text-slate-400 mb-1">Service Status:</div>
+                                <pre className="text-xs bg-slate-100 dark:bg-slate-800 p-2 rounded overflow-x-auto font-mono">{diagnosticsResults.serviceStatus}</pre>
+                            </div>
+                            <div>
+                                <div className="text-sm font-medium text-slate-600 dark:text-slate-400 mb-1">Recent Logs:</div>
+                                <pre className="text-xs bg-slate-100 dark:bg-slate-800 p-2 rounded overflow-x-auto font-mono max-h-64 overflow-y-auto whitespace-pre-wrap">{diagnosticsResults.recentLogs}</pre>
+                            </div>
+                            <div>
+                                <div className="text-sm font-medium text-slate-600 dark:text-slate-400 mb-1">Directory Permissions:</div>
+                                <pre className="text-xs bg-slate-100 dark:bg-slate-800 p-2 rounded overflow-x-auto font-mono">{diagnosticsResults.permissions}</pre>
+                            </div>
+                        </div>
                     </div>
                 )}
                 

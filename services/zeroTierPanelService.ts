@@ -60,6 +60,27 @@ export const restartZeroTierService = (): Promise<{ message: string }> => {
     });
 };
 
+export const deepCleanAndRejoin = (networkId: string): Promise<{ success: boolean; message: string; steps: string[]; networks: any[] }> => {
+    return fetchData('/api/zt/deep-clean-rejoin', {
+        method: 'POST',
+        body: JSON.stringify({ networkId }),
+    });
+};
+
+export const runZeroTierDiagnostics = (): Promise<{ success: boolean; results: any }> => {
+    return fetchData('/api/zt/diagnostics', {
+        method: 'POST',
+        body: JSON.stringify({}),
+    });
+};
+
+export const reauthorizeMember = (networkId: string, memberId: string): Promise<{ message: string; networkId: string; memberId: string }> => {
+    return fetchData('/api/zt/reauthorize', {
+        method: 'POST',
+        body: JSON.stringify({ networkId, memberId }),
+    });
+};
+
 export const leaveZeroTierNetwork = (networkId: string): Promise<{ message: string }> => {
     return fetchData<{ message: string }>('/api/zt/leave', {
         method: 'POST',

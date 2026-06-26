@@ -9980,6 +9980,131 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
         }
     });
 
+    // POST /api/zt/deep-clean-rejoin - Deep clean and rejoin network
+    app.post('/api/zt/deep-clean-rejoin', protect, async (req, res) => {
+        const { networkId } = req.body;
+        console.log('[ZeroTier] Deep clean and rejoin requested for network:', networkId);
+        
+        const steps = [];
+        try {
+            // Step 1: Stop ZeroTier
+            steps.push('Stopping ZeroTier service...');
+            await runCommand('sudo systemctl stop zerotier-one');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // Step 2: Clear corrupted network configs
+            steps.push('Clearing network configurations...');
+            await runCommand('sudo rm -f /var/lib/zerotier-one/networks.d/*.conf');
+            
+            // Step 3: Start ZeroTier
+            steps.push('Starting ZeroTier service...');
+            await runCommand('sudo systemctl start zerotier-one');
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            
+            // Step 4: Join network
+            steps.push(`Joining network ${networkId}...`);
+            const joinOutput = await runCommand(`sudo zerotier-cli join ${networkId}`);
+            steps.push(`Join output: ${joinOutput}`);
+            
+            // Step 5: Wait for network to establish (public networks need more time)
+            steps.push('Waiting for network configuration from controller (30 seconds)...');
+            steps.push('This is normal for public networks - ZeroTier must receive config from the controller');
+            await new Promise(resolve => setTimeout(resolve, 30000));
+            
+            // Step 6: Check status
+            steps.push('Checking network status...');
+            const networksRaw = await runCommand('sudo zerotier-cli listnetworks -j');
+            let networks = [];
+            try {
+                networks = JSON.parse(networksRaw);
+            } catch (e) {
+                networks = [];
+            }
+            
+            steps.push(`Found ${networks.length} network(s)`);
+            
+            res.json({ 
+                success: true, 
+                message: 'Deep clean and rejoin completed',
+                steps: steps,
+                networks: networks
+            });
+        } catch (e) {
+            console.error('[ZeroTier] Deep clean failed:', e);
+            res.status(500).json({ 
+                message: 'Deep clean failed: ' + (e.stderr || e.message),
+                steps: steps
+            });
+        }
+    });
+
+    // POST /api/zt/diagnostics - Run comprehensive diagnostics
+    app.post('/api/zt/diagnostics', protect, async (req, res) => {
+        console.log('[ZeroTier] Running diagnostics...');
+        
+        const results = {};
+        try {
+            // 1. Check ZeroTier status
+            try {
+                results.status = await runCommand('sudo zerotier-cli status');
+            } catch (e) {
+                results.status = `Error: ${e.stderr || e.message}`;
+            }
+            
+            // 2. List networks
+            try {
+                results.networks = await runCommand('sudo zerotier-cli listnetworks');
+            } catch (e) {
+                results.networks = `Error: ${e.stderr || e.message}`;
+            }
+            
+            // 3. Check networks directory
+            try {
+                results.networksDir = await runCommand('ls -la /var/lib/zerotier-one/networks.d/');
+            } catch (e) {
+                results.networksDir = `Error: ${e.stderr || e.message}`;
+            }
+            
+            // 4. Check service status
+            try {
+                results.serviceStatus = await runCommand('sudo systemctl is-active zerotier-one');
+            } catch (e) {
+                results.serviceStatus = `Error: ${e.stderr || e.message}`;
+            }
+            
+            // 5. Recent logs
+            try {
+                results.recentLogs = await runCommand('sudo journalctl -u zerotier-one -n 20 --no-pager');
+            } catch (e) {
+                results.recentLogs = `Error: ${e.stderr || e.message}`;
+            }
+            
+            // 6. Check ZeroTier directory permissions
+            try {
+                results.permissions = await runCommand('ls -la /var/lib/zerotier-one/ | head -20');
+            } catch (e) {
+                results.permissions = `Error: ${e.stderr || e.message}`;
+            }
+            
+            res.json({ success: true, results });
+        } catch (e) {
+            console.error('[ZeroTier] Diagnostics failed:', e);
+            res.status(500).json({ message: 'Diagnostics failed: ' + (e.stderr || e.message) });
+        }
+    });
+
+    // POST /api/zt/reauthorize - Check and reauthorize member in ZeroTier Central
+    app.post('/api/zt/reauthorize', protect, async (req, res) => {
+        const { networkId, memberId } = req.body;
+        console.log('[ZeroTier] Reauthorize request for member:', memberId, 'in network:', networkId);
+        
+        res.json({ 
+            message: 'Please authorize this member in ZeroTier Central: https://my.zerotier.com/network/' + networkId,
+            networkId,
+            memberId
+        });
+    });
+
     app.post('/api/zt/leave', protect, async (req, res) => {
         const { networkId } = req.body;
         try {
