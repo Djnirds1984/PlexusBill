@@ -1227,21 +1227,18 @@ async function startServer() {
             // Hash admin password
             const passwordHash = await bcrypt.hash(password, 10);
             
-            // Create tenant record in superadmin database
+            // Create tenant database FIRST
+            const dbPath = await createTenantDatabase(tenantId, slug, adminUsername, password);
+            
+            // Create tenant record in superadmin database with database_path
             const trialEndsAt = new Date();
             trialEndsAt.setDate(trialEndsAt.getDate() + 14); // 14-day trial
             
             await superadminDb.run(`
                 INSERT INTO tenants (id, slug, name, admin_email, admin_username, admin_password_hash, 
-                                    subscription_tier, trial_ends_at, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
-            `, tenantId, slug, name, adminEmail, adminUsername, passwordHash, tier || 'free', trialEndsAt.toISOString());
-            
-            // Create tenant database
-            const dbPath = await createTenantDatabase(tenantId, slug, adminUsername, password);
-            
-            // Update tenant record with database path
-            await superadminDb.run('UPDATE tenants SET database_path = ? WHERE id = ?', dbPath, tenantId);
+                                    subscription_tier, trial_ends_at, status, database_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+            `, tenantId, slug, name, adminEmail, adminUsername, passwordHash, tier || 'free', trialEndsAt.toISOString(), dbPath);
             
             // Log activity
             await superadminDb.run(`
