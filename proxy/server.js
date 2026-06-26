@@ -10280,6 +10280,122 @@ WantedBy=multi-user.target`;
         }
     });
     
+    // GET /api/superadmin/ntp - Get NTP configuration
+    superRouter.get('/ntp', async (req, res) => {
+        try {
+            console.log('[SuperAdmin] Fetching NTP configuration');
+            
+            // Get current NTP status and servers
+            const { exec } = require('child_process');
+            const { promisify } = require('util');
+            const execAsync = promisify(exec);
+            
+            // Get timedatectl status
+            const { stdout: timedatectlOutput } = await execAsync('timedatectl status');
+            
+            // Get NTP servers from timesyncd config
+            const { stdout: ntpConfig } = await execAsync('cat /etc/systemd/timesyncd.conf 2>/dev/null || echo "NTP="');
+            
+            // Parse current time and sync status
+            const lines = timedatectlOutput.split('\n');
+            const ntpInfo = {
+                currentTime: '',
+                timeZone: '',
+                ntpEnabled: false,
+                ntpSynchronized: false,
+                ntpServers: [],
+                rawConfig: ntpConfig
+            };
+            
+            lines.forEach(line => {
+                if (line.includes('Local time:')) {
+                    ntpInfo.currentTime = line.split(':')[1]?.trim() || '';
+                }
+                if (line.includes('Time zone:')) {
+                    ntpInfo.timeZone = line.split(':')[1]?.trim() || '';
+                }
+                if (line.includes('System clock synchronized:')) {
+                    ntpInfo.ntpSynchronized = line.includes('yes');
+                }
+                if (line.includes('NTP service:') || line.includes('Network time on:')) {
+                    ntpInfo.ntpEnabled = line.includes('active') || line.includes('yes');
+                }
+            });
+            
+            // Parse NTP servers from config
+            const ntpMatch = ntpConfig.match(/^NTP=(.*)$/m);
+            if (ntpMatch) {
+                ntpInfo.ntpServers = ntpMatch[1].split(/\s+/).filter(s => s.trim());
+            }
+            
+            // Use defaults if no servers configured
+            if (ntpInfo.ntpServers.length === 0) {
+                ntpInfo.ntpServers = ['pool.ntp.org', 'time.google.com', 'time.cloudflare.com'];
+            }
+            
+            res.json(ntpInfo);
+        } catch (err) {
+            console.error('[SuperAdmin] Failed to get NTP config:', err);
+            res.status(500).json({ 
+                message: 'Failed to get NTP configuration: ' + err.message 
+            });
+        }
+    });
+    
+    // POST /api/superadmin/ntp - Update NTP configuration
+    superRouter.post('/ntp', async (req, res) => {
+        try {
+            const { ntpServers, enableNTP } = req.body;
+            console.log('[SuperAdmin] Updating NTP configuration:', { ntpServers, enableNTP });
+            
+            const { exec } = require('child_process');
+            const { promisify } = require('util');
+            const execAsync = promisify(exec);
+            
+            if (!ntpServers || !Array.isArray(ntpServers) || ntpServers.length === 0) {
+                return res.status(400).json({ message: 'At least one NTP server is required' });
+            }
+            
+            // Validate NTP server format
+            const ntpRegex = /^[a-zA-Z0-9.-]+$/;
+            for (const server of ntpServers) {
+                if (!ntpRegex.test(server)) {
+                    return res.status(400).json({ message: `Invalid NTP server format: ${server}` });
+                }
+            }
+            
+            // Update timesyncd configuration
+            const serversString = ntpServers.join(' ');
+            const configContent = `[Time]
+NTP=${serversString}
+FallbackNTP=0.pool.ntp.org 1.pool.ntp.org
+`;
+            
+            // Write config file
+            await execAsync(`echo '${configContent}' | sudo tee /etc/systemd/timesyncd.conf`);
+            
+            // Enable or disable NTP sync
+            if (enableNTP) {
+                await execAsync('sudo timedatectl set-ntp true');
+                await execAsync('sudo systemctl restart systemd-timesyncd');
+            } else {
+                await execAsync('sudo timedatectl set-ntp false');
+            }
+            
+            console.log('[SuperAdmin] NTP configuration updated successfully');
+            
+            res.json({ 
+                success: true, 
+                message: 'NTP configuration updated successfully. Changes will take effect shortly.' 
+            });
+        } catch (err) {
+            console.error('[SuperAdmin] Failed to update NTP config:', err);
+            res.status(500).json({ 
+                message: 'Failed to update NTP configuration: ' + err.message 
+            });
+        }
+    });
+    
     superRouter.get('/list-full-backups', async (req, res) => {
         try {
             const files = await fs.promises.readdir(BACKUP_DIR);

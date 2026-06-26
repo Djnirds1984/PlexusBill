@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Loader } from './Loader.tsx';
 import { getAuthHeader } from '../services/databaseService.ts';
 import { CodeBlock } from './CodeBlock.tsx';
-import { LockClosedIcon, TrashIcon, CloudArrowUpIcon, UpdateIcon, ExclamationTriangleIcon, ServerIcon, UsersIcon } from '../constants.tsx';
+import { LockClosedIcon, TrashIcon, CloudArrowUpIcon, UpdateIcon, ExclamationTriangleIcon, ServerIcon, UsersIcon, ClockIcon } from '../constants.tsx';
 import { useAuth } from '../contexts/AuthContext.tsx';
 import { CloudflareTunnel } from './CloudflareTunnel.tsx';
 import { ZeroTier } from './ZeroTier.tsx';
@@ -10,7 +10,7 @@ import { Updater } from './Updater.tsx';
 import { factoryReset } from '../services/databaseService.ts';
 import { useLocalization } from '../contexts/LocalizationContext.tsx';
 
-type SuperAdminTab = 'backup' | 'zerotier' | 'updater' | 'factory-reset' | 'cloudflare' | 'tenant-approval';
+type SuperAdminTab = 'backup' | 'zerotier' | 'updater' | 'factory-reset' | 'cloudflare' | 'tenant-approval' | 'ntp';
 
 const TabButton: React.FC<{
     label: string;
@@ -556,6 +556,206 @@ const TenantApprovalManager: React.FC = () => {
     );
 };
 
+// --- NTP Settings Component ---
+const NTPSettingsManager: React.FC = () => {
+    const [ntpInfo, setNtpInfo] = useState<any>(null);
+    const [status, setStatus] = useState<'idle' | 'loading' | 'saving' | 'error'>('loading');
+    const [error, setError] = useState<string | null>(null);
+    const [success, setSuccess] = useState<string | null>(null);
+    const [ntpServers, setNtpServers] = useState<string>('');
+    const [enableNTP, setEnableNTP] = useState(true);
+
+    const fetchNTPInfo = useCallback(async () => {
+        setStatus('loading');
+        setError(null);
+        try {
+            const res = await fetch('/api/superadmin/ntp', { headers: getAuthHeader() });
+            if (!res.ok) throw new Error('Failed to fetch NTP configuration.');
+            const data = await res.json();
+            setNtpInfo(data);
+            setNtpServers(data.ntpServers.join('\n'));
+            setEnableNTP(data.ntpEnabled);
+            setStatus('idle');
+        } catch (err) {
+            setError((err as Error).message);
+            setStatus('error');
+        }
+    }, []);
+
+    useEffect(() => {
+        fetchNTPInfo();
+    }, [fetchNTPInfo]);
+
+    const handleSave = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError(null);
+        setSuccess(null);
+        setStatus('saving');
+
+        const servers = ntpServers.split('\n').map(s => s.trim()).filter(s => s);
+
+        if (servers.length === 0) {
+            setError('At least one NTP server is required.');
+            setStatus('idle');
+            return;
+        }
+
+        try {
+            const res = await fetch('/api/superadmin/ntp', {
+                method: 'POST',
+                headers: { ...getAuthHeader(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ntpServers: servers, enableNTP })
+            });
+            
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.message || 'Failed to update NTP configuration.');
+            
+            setSuccess(data.message);
+            await fetchNTPInfo();
+        } catch (err) {
+            setError((err as Error).message);
+        } finally {
+            setStatus('idle');
+        }
+    };
+
+    if (status === 'loading') {
+        return (
+            <div className="flex flex-col items-center justify-center h-64">
+                <Loader />
+                <p className="mt-4 text-[--color-primary-500] dark:text-[--color-primary-400]">Loading NTP configuration...</p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="max-w-4xl mx-auto space-y-6">
+            <div>
+                <h2 className="text-3xl font-bold text-slate-900 dark:text-slate-100">NTP Time Settings</h2>
+                <p className="text-slate-500 dark:text-slate-400 mt-1">Configure Network Time Protocol to keep your server clock synchronized</p>
+            </div>
+
+            {/* Current Status */}
+            {ntpInfo && (
+                <div className="glass-card">
+                    <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-4">Current Status</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
+                            <div className="text-sm text-slate-500 dark:text-slate-400">Current Time</div>
+                            <div className="text-lg font-semibold text-slate-900 dark:text-slate-100 mt-1">
+                                {ntpInfo.currentTime || 'N/A'}
+                            </div>
+                        </div>
+                        <div className="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
+                            <div className="text-sm text-slate-500 dark:text-slate-400">Time Zone</div>
+                            <div className="text-lg font-semibold text-slate-900 dark:text-slate-100 mt-1">
+                                {ntpInfo.timeZone || 'N/A'}
+                            </div>
+                        </div>
+                        <div className="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
+                            <div className="text-sm text-slate-500 dark:text-slate-400">NTP Service</div>
+                            <div className="mt-1">
+                                <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
+                                    ntpInfo.ntpEnabled 
+                                        ? 'bg-green-100 dark:bg-green-500/20 text-green-700 dark:text-green-400' 
+                                        : 'bg-red-100 dark:bg-red-500/20 text-red-700 dark:text-red-400'
+                                }`}>
+                                    {ntpInfo.ntpEnabled ? 'Enabled' : 'Disabled'}
+                                </span>
+                            </div>
+                        </div>
+                        <div className="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
+                            <div className="text-sm text-slate-500 dark:text-slate-400">Clock Synchronized</div>
+                            <div className="mt-1">
+                                <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
+                                    ntpInfo.ntpSynchronized 
+                                        ? 'bg-green-100 dark:bg-green-500/20 text-green-700 dark:text-green-400' 
+                                        : 'bg-yellow-100 dark:bg-yellow-500/20 text-yellow-700 dark:text-yellow-400'
+                                }`}>
+                                    {ntpInfo.ntpSynchronized ? 'Synchronized' : 'Not Synchronized'}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Configuration Form */}
+            <div className="glass-card">
+                <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-4">NTP Configuration</h3>
+                
+                {error && <div className="mb-4 p-3 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 rounded-md">{error}</div>}
+                {success && <div className="mb-4 p-3 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded-md">{success}</div>}
+
+                <form onSubmit={handleSave} className="space-y-4">
+                    <div>
+                        <label htmlFor="ntpServers" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+                            NTP Servers (one per line)
+                        </label>
+                        <textarea
+                            id="ntpServers"
+                            value={ntpServers}
+                            onChange={(e) => setNtpServers(e.target.value)}
+                            rows={5}
+                            className="block w-full bg-slate-100 dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-md py-2 px-3 text-slate-900 dark:text-white font-mono text-sm"
+                            placeholder="pool.ntp.org&#10;time.google.com&#10;time.cloudflare.com"
+                        />
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                            Enter one NTP server per line. Common servers: pool.ntp.org, time.google.com, time.cloudflare.com
+                        </p>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                        <input
+                            type="checkbox"
+                            id="enableNTP"
+                            checked={enableNTP}
+                            onChange={(e) => setEnableNTP(e.target.checked)}
+                            className="w-4 h-4 text-[--color-primary-600] bg-slate-100 dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded focus:ring-[--color-primary-500]"
+                        />
+                        <label htmlFor="enableNTP" className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                            Enable automatic time synchronization
+                        </label>
+                    </div>
+
+                    <div className="pt-4">
+                        <button
+                            type="submit"
+                            disabled={status === 'saving'}
+                            className="px-5 py-2.5 bg-[--color-primary-600] hover:bg-[--color-primary-500] disabled:bg-[--color-primary-400] text-white font-semibold rounded-lg transition-colors"
+                        >
+                            {status === 'saving' ? 'Saving...' : 'Save NTP Configuration'}
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            {/* Common NTP Servers */}
+            <div className="glass-card">
+                <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-4">Recommended NTP Servers</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                    <div className="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
+                        <div className="font-semibold text-slate-900 dark:text-slate-100">pool.ntp.org</div>
+                        <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Global NTP pool (recommended)</div>
+                    </div>
+                    <div className="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
+                        <div className="font-semibold text-slate-900 dark:text-slate-100">time.google.com</div>
+                        <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Google Public NTP</div>
+                    </div>
+                    <div className="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
+                        <div className="font-semibold text-slate-900 dark:text-slate-100">time.cloudflare.com</div>
+                        <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Cloudflare NTP</div>
+                    </div>
+                    <div className="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
+                        <div className="font-semibold text-slate-900 dark:text-slate-100">time.nist.gov</div>
+                        <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">NIST (US Government)</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 export const SuperAdmin: React.FC = () => {
     const { logout } = useAuth();
     const { t } = useLocalization();
@@ -651,6 +851,8 @@ export const SuperAdmin: React.FC = () => {
                 return <CloudflareTunnel />;
             case 'tenant-approval':
                 return <TenantApprovalManager />;
+            case 'ntp':
+                return <NTPSettingsManager />;
             default:
                 return <FullBackupManager />;
         }
@@ -695,6 +897,12 @@ export const SuperAdmin: React.FC = () => {
                         icon={<UsersIcon className="w-5 h-5"/>} 
                         isActive={activeTab === 'tenant-approval'} 
                         onClick={() => setActiveTab('tenant-approval')} 
+                    />
+                    <TabButton 
+                        label="NTP Settings" 
+                        icon={<ClockIcon className="w-5 h-5"/>} 
+                        isActive={activeTab === 'ntp'} 
+                        onClick={() => setActiveTab('ntp')} 
                     />
                 </nav>
             </div>
