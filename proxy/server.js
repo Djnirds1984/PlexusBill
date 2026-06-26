@@ -112,7 +112,10 @@ async function initSuperadminDb() {
                 admin_email TEXT UNIQUE NOT NULL,
                 admin_password_hash TEXT NOT NULL,
                 admin_username TEXT UNIQUE NOT NULL,
-                status TEXT DEFAULT 'active',
+                status TEXT DEFAULT 'pending',
+                approval_status TEXT DEFAULT 'pending',
+                approved_by TEXT,
+                approved_at TEXT,
                 subscription_tier TEXT DEFAULT 'free',
                 subscription_status TEXT DEFAULT 'trial',
                 trial_ends_at TEXT,
@@ -125,6 +128,31 @@ async function initSuperadminDb() {
                 updated_at TEXT
             );
         `);
+        
+        // Add approval_status column if it doesn't exist (for existing databases)
+        try {
+            await superadminDb.exec(`
+                ALTER TABLE tenants ADD COLUMN approval_status TEXT DEFAULT 'pending';
+            `);
+        } catch (e) {
+            // Column already exists, ignore error
+        }
+        
+        try {
+            await superadminDb.exec(`
+                ALTER TABLE tenants ADD COLUMN approved_by TEXT;
+            `);
+        } catch (e) {
+            // Column already exists, ignore error
+        }
+        
+        try {
+            await superadminDb.exec(`
+                ALTER TABLE tenants ADD COLUMN approved_at TEXT;
+            `);
+        } catch (e) {
+            // Column already exists, ignore error
+        }
         
         // Create tenant activity logs table
         await superadminDb.exec(`
@@ -1236,8 +1264,8 @@ async function startServer() {
             
             await superadminDb.run(`
                 INSERT INTO tenants (id, slug, name, admin_email, admin_username, admin_password_hash, 
-                                    subscription_tier, trial_ends_at, status, database_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+                                    subscription_tier, trial_ends_at, status, approval_status, database_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', ?)
             `, tenantId, slug, name, adminEmail, adminUsername, passwordHash, tier || 'free', trialEndsAt.toISOString(), dbPath);
             
             // Log activity
@@ -1267,13 +1295,23 @@ async function startServer() {
         try {
             // Resolve tenant
             const tenant = await superadminDb.get(
-                'SELECT * FROM tenants WHERE slug = ? AND status = ?',
-                tenantSlug,
-                'active'
+                'SELECT * FROM tenants WHERE slug = ?',
+                tenantSlug
             );
             
             if (!tenant) {
-                return res.status(404).json({ error: 'Tenant not found or suspended' });
+                return res.status(404).json({ error: 'Tenant not found' });
+            }
+            
+            if (tenant.approval_status !== 'approved') {
+                return res.status(403).json({ 
+                    error: 'Tenant account is pending approval. Please contact support.',
+                    approvalStatus: tenant.approval_status
+                });
+            }
+            
+            if (tenant.status !== 'active') {
+                return res.status(403).json({ error: 'Tenant account is suspended' });
             }
             
             // Get tenant database
@@ -1286,9 +1324,18 @@ async function startServer() {
                 LEFT JOIN roles r ON u.role_id = r.id 
                 WHERE u.username = ?`, [username]);
             
-            if (!user || !(await bcrypt.compare(password, user.password))) {
+            if (!user) {
+                console.log(`[Tenant Login] User not found: ${username} in tenant: ${tenantSlug}`);
                 return res.status(401).json({ error: 'Invalid credentials' });
             }
+            
+            const passwordMatch = await bcrypt.compare(password, user.password);
+            if (!passwordMatch) {
+                console.log(`[Tenant Login] Password mismatch for user: ${username} in tenant: ${tenantSlug}`);
+                return res.status(401).json({ error: 'Invalid credentials' });
+            }
+            
+            console.log(`[Tenant Login] Successful login: ${username} in tenant: ${tenantSlug}`);
             
             // Get permissions
             const permissions = await tenantDb.all(`
@@ -1322,6 +1369,91 @@ async function startServer() {
         } catch (err) {
             console.error('[Tenant Login Error]', err);
             res.status(500).json({ error: 'Login failed' });
+        }
+    });
+
+    // --- SUPERADMIN TENANT MANAGEMENT ---
+    
+    // GET /api/superadmin/tenants - List all tenants
+    app.get('/api/superadmin/tenants', async (req, res) => {
+        try {
+            const tenants = await superadminDb.all(`
+                SELECT id, slug, name, admin_email, admin_username, status, 
+                       approval_status, approved_by, approved_at, subscription_tier,
+                       trial_ends_at, max_routers, max_users, max_customers, created_at
+                FROM tenants
+                ORDER BY created_at DESC
+            `);
+            res.json({ tenants });
+        } catch (err) {
+            console.error('[Get Tenants Error]', err);
+            res.status(500).json({ error: 'Failed to fetch tenants' });
+        }
+    });
+
+    // POST /api/superadmin/tenants/:tenantId/approve - Approve tenant
+    app.post('/api/superadmin/tenants/:tenantId/approve', async (req, res) => {
+        const { tenantId } = req.params;
+        const { approvedBy } = req.body;
+        
+        try {
+            const tenant = await superadminDb.get('SELECT * FROM tenants WHERE id = ?', tenantId);
+            if (!tenant) {
+                return res.status(404).json({ error: 'Tenant not found' });
+            }
+            
+            await superadminDb.run(`
+                UPDATE tenants 
+                SET approval_status = 'approved', 
+                    approved_by = ?, 
+                    approved_at = datetime('now'),
+                    status = 'active',
+                    updated_at = datetime('now')
+                WHERE id = ?
+            `, approvedBy || 'superadmin', tenantId);
+            
+            // Log activity
+            await superadminDb.run(`
+                INSERT INTO tenant_activity_logs (id, tenant_id, action, details)
+                VALUES (?, ?, 'tenant_approved', ?)
+            `, `log_${Date.now()}`, tenantId, JSON.stringify({ approvedBy }));
+            
+            res.json({ success: true, message: 'Tenant approved successfully' });
+        } catch (err) {
+            console.error('[Approve Tenant Error]', err);
+            res.status(500).json({ error: 'Failed to approve tenant' });
+        }
+    });
+
+    // POST /api/superadmin/tenants/:tenantId/reject - Reject tenant
+    app.post('/api/superadmin/tenants/:tenantId/reject', async (req, res) => {
+        const { tenantId } = req.params;
+        const { reason } = req.body;
+        
+        try {
+            const tenant = await superadminDb.get('SELECT * FROM tenants WHERE id = ?', tenantId);
+            if (!tenant) {
+                return res.status(404).json({ error: 'Tenant not found' });
+            }
+            
+            await superadminDb.run(`
+                UPDATE tenants 
+                SET approval_status = 'rejected', 
+                    status = 'suspended',
+                    updated_at = datetime('now')
+                WHERE id = ?
+            `, tenantId);
+            
+            // Log activity
+            await superadminDb.run(`
+                INSERT INTO tenant_activity_logs (id, tenant_id, action, details)
+                VALUES (?, ?, 'tenant_rejected', ?)
+            `, `log_${Date.now()}`, tenantId, JSON.stringify({ reason }));
+            
+            res.json({ success: true, message: 'Tenant rejected' });
+        } catch (err) {
+            console.error('[Reject Tenant Error]', err);
+            res.status(500).json({ error: 'Failed to reject tenant' });
         }
     });
 
