@@ -10312,7 +10312,9 @@ WantedBy=multi-user.target`;
                     ntpInfo.currentTime = line.split(':')[1]?.trim() || '';
                 }
                 if (line.includes('Time zone:')) {
-                    ntpInfo.timeZone = line.split(':')[1]?.trim() || '';
+                    // Extract timezone (e.g., "Asia/Manila (PST, +0800)")
+                    const tzMatch = line.match(/Time zone:\s+(.+)$/);
+                    ntpInfo.timeZone = tzMatch ? tzMatch[1].trim() : '';
                 }
                 if (line.includes('System clock synchronized:')) {
                     ntpInfo.ntpSynchronized = line.includes('yes');
@@ -10338,6 +10340,43 @@ WantedBy=multi-user.target`;
             console.error('[SuperAdmin] Failed to get NTP config:', err);
             res.status(500).json({ 
                 message: 'Failed to get NTP configuration: ' + err.message 
+            });
+        }
+    });
+    
+    // POST /api/superadmin/timezone - Update timezone
+    superRouter.post('/timezone', async (req, res) => {
+        try {
+            const { timezone } = req.body;
+            console.log('[SuperAdmin] Updating timezone to:', timezone);
+            
+            const { exec } = require('child_process');
+            const { promisify } = require('util');
+            const execAsync = promisify(exec);
+            
+            if (!timezone) {
+                return res.status(400).json({ message: 'Timezone is required' });
+            }
+            
+            // Validate timezone format (e.g., Asia/Manila, America/New_York)
+            const tzRegex = /^[A-Za-z]+\/[A-Za-z_]+$/;
+            if (!tzRegex.test(timezone)) {
+                return res.status(400).json({ message: 'Invalid timezone format. Expected: Region/City' });
+            }
+            
+            // Set timezone
+            await execAsync(`sudo timedatectl set-timezone ${timezone}`);
+            
+            console.log('[SuperAdmin] Timezone updated successfully');
+            
+            res.json({ 
+                success: true, 
+                message: `Timezone updated to ${timezone}` 
+            });
+        } catch (err) {
+            console.error('[SuperAdmin] Failed to update timezone:', err);
+            res.status(500).json({ 
+                message: 'Failed to update timezone: ' + err.message 
             });
         }
     });

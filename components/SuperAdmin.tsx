@@ -567,6 +567,36 @@ const NTPSettingsManager: React.FC = () => {
     const [success, setSuccess] = useState<string | null>(null);
     const [countryCode, setCountryCode] = useState('PH');
     const [enableNTP, setEnableNTP] = useState(true);
+    const [currentTimezone, setCurrentTimezone] = useState('');
+    const [selectedTimezone, setSelectedTimezone] = useState('Asia/Manila');
+
+    const timezoneList = [
+        { value: 'Asia/Manila', label: '🇵🇭 Philippines (PST, UTC+8)', offset: '+08:00' },
+        { value: 'Asia/Shanghai', label: '🇨🇳 China (CST, UTC+8)', offset: '+08:00' },
+        { value: 'Asia/Singapore', label: '🇸🇬 Singapore (SGT, UTC+8)', offset: '+08:00' },
+        { value: 'Asia/Tokyo', label: '🇯🇵 Japan (JST, UTC+9)', offset: '+09:00' },
+        { value: 'Asia/Seoul', label: '🇰🇷 South Korea (KST, UTC+9)', offset: '+09:00' },
+        { value: 'Asia/Bangkok', label: '🇹🇭 Thailand (ICT, UTC+7)', offset: '+07:00' },
+        { value: 'Asia/Ho_Chi_Minh', label: '🇻🇳 Vietnam (ICT, UTC+7)', offset: '+07:00' },
+        { value: 'Asia/Jakarta', label: '🇮🇩 Indonesia/Western (WIB, UTC+7)', offset: '+07:00' },
+        { value: 'Asia/Kuala_Lumpur', label: '🇲🇾 Malaysia (MYT, UTC+8)', offset: '+08:00' },
+        { value: 'Asia/Hong_Kong', label: '🇭🇰 Hong Kong (HKT, UTC+8)', offset: '+08:00' },
+        { value: 'Asia/Taipei', label: '🇹🇼 Taiwan (CST, UTC+8)', offset: '+08:00' },
+        { value: 'Australia/Sydney', label: '🇦🇺 Australia/Sydney (AEST, UTC+10)', offset: '+10:00' },
+        { value: 'Australia/Perth', label: '🇦🇺 Australia/Perth (AWST, UTC+8)', offset: '+08:00' },
+        { value: 'America/New_York', label: '🇺🇸 US/Eastern (EST, UTC-5)', offset: '-05:00' },
+        { value: 'America/Chicago', label: '🇺🇸 US/Central (CST, UTC-6)', offset: '-06:00' },
+        { value: 'America/Denver', label: '🇺🇸 US/Mountain (MST, UTC-7)', offset: '-07:00' },
+        { value: 'America/Los_Angeles', label: '🇺🇸 US/Pacific (PST, UTC-8)', offset: '-08:00' },
+        { value: 'America/Toronto', label: '🇨🇦 Canada/Eastern (EST, UTC-5)', offset: '-05:00' },
+        { value: 'Europe/London', label: '🇬🇧 UK (GMT, UTC+0)', offset: '+00:00' },
+        { value: 'Europe/Berlin', label: '🇩🇪 Germany (CET, UTC+1)', offset: '+01:00' },
+        { value: 'Europe/Paris', label: '🇫🇷 France (CET, UTC+1)', offset: '+01:00' },
+        { value: 'Europe/Moscow', label: '🇷🇺 Russia/Moscow (MSK, UTC+3)', offset: '+03:00' },
+        { value: 'Asia/Kolkata', label: '🇮🇳 India (IST, UTC+5:30)', offset: '+05:30' },
+        { value: 'Asia/Dubai', label: '🇦🇪 UAE (GST, UTC+4)', offset: '+04:00' },
+        { value: 'UTC', label: '🌍 UTC (Coordinated Universal Time)', offset: '+00:00' },
+    ];
 
     const countryList = [
         { code: 'GLOBAL', name: 'Global (Recommended)', flag: '🌍' },
@@ -608,6 +638,10 @@ const NTPSettingsManager: React.FC = () => {
             const data = await res.json();
             setNtpInfo(data);
             setEnableNTP(data.ntpEnabled);
+            // Extract just the timezone name (e.g., "Asia/Manila" from "Asia/Manila (PST, +0800)")
+            const tzName = data.timeZone ? data.timeZone.split(' ')[0] : '';
+            setCurrentTimezone(tzName);
+            setSelectedTimezone(tzName || 'Asia/Manila');
             setStatus('idle');
         } catch (err) {
             setError((err as Error).message);
@@ -626,16 +660,29 @@ const NTPSettingsManager: React.FC = () => {
         setStatus('saving');
 
         try {
-            const res = await fetch('/api/superadmin/ntp', {
+            // Save timezone
+            const tzRes = await fetch('/api/superadmin/timezone', {
+                method: 'POST',
+                headers: { ...getAuthHeader(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ timezone: selectedTimezone })
+            });
+            
+            if (!tzRes.ok) {
+                const tzData = await tzRes.json();
+                throw new Error(tzData.message || 'Failed to update timezone');
+            }
+            
+            // Save NTP
+            const ntpRes = await fetch('/api/superadmin/ntp', {
                 method: 'POST',
                 headers: { ...getAuthHeader(), 'Content-Type': 'application/json' },
                 body: JSON.stringify({ countryCode, enableNTP })
             });
             
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.message || 'Failed to update NTP configuration.');
+            const ntpData = await ntpRes.json();
+            if (!ntpRes.ok) throw new Error(ntpData.message || 'Failed to update NTP configuration.');
             
-            setSuccess(data.message);
+            setSuccess(`✅ Timezone and NTP configuration updated successfully!`);
             await fetchNTPInfo();
         } catch (err) {
             setError((err as Error).message);
@@ -723,6 +770,31 @@ const NTPSettingsManager: React.FC = () => {
                 {success && <div className="mb-4 p-3 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded-md">{success}</div>}
 
                 <form onSubmit={handleSave} className="space-y-4">
+                    {/* Timezone Selector */}
+                    <div>
+                        <label htmlFor="timezone" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+                            Select Timezone
+                        </label>
+                        <select
+                            id="timezone"
+                            value={selectedTimezone}
+                            onChange={(e) => setSelectedTimezone(e.target.value)}
+                            className="block w-full bg-slate-100 dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-md py-2.5 px-3 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-[--color-primary-500]"
+                        >
+                            {timezoneList.map(tz => (
+                                <option key={tz.value} value={tz.value}>
+                                    {tz.label}
+                                </option>
+                            ))}
+                        </select>
+                        {currentTimezone && (
+                            <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                                ⚠️ Current: <span className="font-mono">{currentTimezone}</span> — Will change to: <span className="font-mono">{selectedTimezone}</span>
+                            </p>
+                        )}
+                    </div>
+
+                    {/* Country Selector */}
                     <div>
                         <label htmlFor="country" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
                             Select Country/Region
