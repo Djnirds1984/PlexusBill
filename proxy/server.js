@@ -17,6 +17,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const archiver = require('archiver');
 const tar = require('tar');
+const { createTenantDatabase, getTenantDb, closeTenantDb } = require('./tenantManager');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -98,7 +99,46 @@ async function initSuperadminDb() {
             filename: SUPERADMIN_DB_PATH,
             driver: sqlite3.Database
         });
+        
+        // Create superadmin table
         await superadminDb.exec('CREATE TABLE IF NOT EXISTS superadmin (username TEXT PRIMARY KEY, password TEXT NOT NULL);');
+        
+        // Create tenants table for multi-tenant support
+        await superadminDb.exec(`
+            CREATE TABLE IF NOT EXISTS tenants (
+                id TEXT PRIMARY KEY,
+                slug TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                admin_email TEXT UNIQUE NOT NULL,
+                admin_password_hash TEXT NOT NULL,
+                admin_username TEXT UNIQUE NOT NULL,
+                status TEXT DEFAULT 'active',
+                subscription_tier TEXT DEFAULT 'free',
+                subscription_status TEXT DEFAULT 'trial',
+                trial_ends_at TEXT,
+                subscription_ends_at TEXT,
+                database_path TEXT NOT NULL,
+                max_routers INTEGER DEFAULT 3,
+                max_users INTEGER DEFAULT 10,
+                max_customers INTEGER DEFAULT 100,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT
+            );
+        `);
+        
+        // Create tenant activity logs table
+        await superadminDb.exec(`
+            CREATE TABLE IF NOT EXISTS tenant_activity_logs (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT,
+                action TEXT,
+                details TEXT,
+                ip_address TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+            );
+        `);
+        
         const superadminUser = await superadminDb.get("SELECT COUNT(*) as count FROM superadmin");
         if (superadminUser.count === 0) {
             const defaultPassword = 'Akoangnagwagi84%';
@@ -921,6 +961,71 @@ async function startServer() {
     }));
     app.use(express.text({ limit: '10mb' }));
 
+    // --- TENANT RESOLUTION MIDDLEWARE ---
+    // This middleware resolves tenant from URL path for /tenant/:tenantSlug routes
+    async function resolveTenant(req, res, next) {
+        const { tenantSlug } = req.params;
+        
+        if (!tenantSlug) {
+            return res.status(400).json({ error: 'Tenant slug required' });
+        }
+        
+        try {
+            const tenant = await superadminDb.get(
+                'SELECT * FROM tenants WHERE slug = ? AND status = ?',
+                tenantSlug,
+                'active'
+            );
+            
+            if (!tenant) {
+                return res.status(404).json({ error: 'Tenant not found or suspended' });
+            }
+            
+            // Check trial/subscription status
+            if (tenant.trial_ends_at && new Date(tenant.trial_ends_at) < new Date()) {
+                if (tenant.subscription_status === 'trial') {
+                    return res.status(403).json({ 
+                        error: 'Trial expired',
+                        trialExpired: true 
+                    });
+                }
+            }
+            
+            // Attach tenant info to request
+            req.tenant = tenant;
+            
+            // Get tenant database connection
+            req.tenantDb = await getTenantDb(tenant.id, superadminDb);
+            
+            next();
+        } catch (err) {
+            console.error('[Tenant Resolution Error]', err);
+            res.status(500).json({ error: 'Failed to resolve tenant' });
+        }
+    }
+
+    // Tenant isolation validation middleware
+    function validateTenantIsolation(req, res, next) {
+        const userTenantId = req.user?.tenantId;
+        const requestedTenantId = req.tenant?.id;
+        
+        // Superadmin can access any tenant
+        if (req.user?.isSuperadmin) {
+            return next();
+        }
+        
+        // Regular users can only access their own tenant
+        if (userTenantId && requestedTenantId && userTenantId !== requestedTenantId) {
+            console.warn(`[Security] Tenant isolation violation: User ${req.user.id} attempted to access tenant ${requestedTenantId}`);
+            return res.status(403).json({ error: 'Access denied' });
+        }
+        
+        next();
+    }
+
+    // Apply tenant middleware to tenant-scoped routes
+    app.use('/tenant/:tenantSlug/api/*', resolveTenant, validateTenantIsolation);
+
     // --- HOTSPOT CONTROLLER MODULE (Isolated) ---
     const hotspotDb = require('./hotspot/db');
     const hotspotSessionManager = require('./hotspot/sessionManager');
@@ -1089,6 +1194,137 @@ async function startServer() {
         } catch (err) {
             console.error('[NodeMCU Pulse Error]', err);
             res.status(500).json({ message: err.message });
+        }
+    });
+
+    // --- TENANT REGISTRATION & MANAGEMENT ROUTES ---
+    
+    // POST /api/tenants/register - Self-service tenant registration
+    app.post('/api/tenants/register', async (req, res) => {
+        const { name, slug, adminEmail, adminUsername, password, tier } = req.body;
+        
+        try {
+            // Validate slug format (alphanumeric and hyphens only, must start with letter)
+            if (!/^[a-z][a-z0-9-]*$/.test(slug)) {
+                return res.status(400).json({ error: 'Invalid slug format. Use lowercase letters, numbers, and hyphens only. Must start with a letter.' });
+            }
+            
+            // Check if slug already exists
+            const existing = await superadminDb.get('SELECT id FROM tenants WHERE slug = ?', slug);
+            if (existing) {
+                return res.status(409).json({ error: 'Tenant slug already taken' });
+            }
+            
+            // Check if email already exists
+            const existingEmail = await superadminDb.get('SELECT id FROM tenants WHERE admin_email = ?', adminEmail);
+            if (existingEmail) {
+                return res.status(409).json({ error: 'Email already registered' });
+            }
+            
+            // Generate tenant ID
+            const tenantId = `tenant_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            
+            // Hash admin password
+            const passwordHash = await bcrypt.hash(password, 10);
+            
+            // Create tenant record in superadmin database
+            const trialEndsAt = new Date();
+            trialEndsAt.setDate(trialEndsAt.getDate() + 14); // 14-day trial
+            
+            await superadminDb.run(`
+                INSERT INTO tenants (id, slug, name, admin_email, admin_username, admin_password_hash, 
+                                    subscription_tier, trial_ends_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+            `, tenantId, slug, name, adminEmail, adminUsername, passwordHash, tier || 'free', trialEndsAt.toISOString());
+            
+            // Create tenant database
+            const dbPath = await createTenantDatabase(tenantId, slug, adminUsername, password);
+            
+            // Update tenant record with database path
+            await superadminDb.run('UPDATE tenants SET database_path = ? WHERE id = ?', dbPath, tenantId);
+            
+            // Log activity
+            await superadminDb.run(`
+                INSERT INTO tenant_activity_logs (id, tenant_id, action, details)
+                VALUES (?, ?, 'tenant_registered', ?)
+            `, `log_${Date.now()}`, tenantId, JSON.stringify({ email: adminEmail, tier }));
+            
+            res.status(201).json({
+                success: true,
+                tenantId,
+                slug,
+                message: 'Tenant created successfully. You can now login.'
+            });
+            
+        } catch (err) {
+            console.error('[Tenant Registration Error]', err);
+            res.status(500).json({ error: 'Failed to create tenant' });
+        }
+    });
+
+    // POST /tenant/:tenantSlug/api/auth/login - Tenant-specific login
+    app.post('/tenant/:tenantSlug/api/auth/login', async (req, res) => {
+        const { tenantSlug } = req.params;
+        const { username, password } = req.body;
+        
+        try {
+            // Resolve tenant
+            const tenant = await superadminDb.get(
+                'SELECT * FROM tenants WHERE slug = ? AND status = ?',
+                tenantSlug,
+                'active'
+            );
+            
+            if (!tenant) {
+                return res.status(404).json({ error: 'Tenant not found or suspended' });
+            }
+            
+            // Get tenant database
+            const tenantDb = await getTenantDb(tenant.id, superadminDb);
+            
+            // Lookup user in tenant's database
+            const user = await tenantDb.get(`
+                SELECT u.*, r.name as role_name 
+                FROM users u 
+                LEFT JOIN roles r ON u.role_id = r.id 
+                WHERE u.username = ?`, [username]);
+            
+            if (!user || !(await bcrypt.compare(password, user.password))) {
+                return res.status(401).json({ error: 'Invalid credentials' });
+            }
+            
+            // Get permissions
+            const permissions = await tenantDb.all(`
+                SELECT p.name FROM permissions p
+                JOIN role_permissions rp ON p.id = rp.permission_id
+                WHERE rp.role_id = ?
+            `, [user.role_id]);
+            
+            const permList = permissions.map(p => p.name);
+            
+            // Generate JWT token WITH tenant context
+            const token = jwt.sign({
+                id: user.id,
+                username: user.username,
+                role: { id: user.role_id, name: user.role_name },
+                permissions: permList,
+                tenantId: tenant.id,
+                tenantSlug: tenant.slug
+            }, SECRET_KEY, { expiresIn: '24h' });
+            
+            res.json({
+                token,
+                user: {
+                    id: user.id,
+                    username: user.username,
+                    role: { id: user.role_id, name: user.role_name },
+                    permissions: permList
+                }
+            });
+            
+        } catch (err) {
+            console.error('[Tenant Login Error]', err);
+            res.status(500).json({ error: 'Login failed' });
         }
     });
 
