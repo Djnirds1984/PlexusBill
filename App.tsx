@@ -40,6 +40,7 @@ const Accounting = React.lazy(() => import('./components/Accounting.tsx').then(m
 const Company = React.lazy(() => import('./components/Company.tsx').then(m => ({ default: m.Company })));
 const Terminal = React.lazy(() => import('./components/Terminal.tsx').then(m => ({ default: m.Terminal })));
 const Login = React.lazy(() => import('./components/Login.tsx').then(m => ({ default: m.Login })));
+const TenantLogin = React.lazy(() => import('./components/TenantLogin.tsx').then(m => ({ default: m.TenantLogin })));
 const TenantRegistration = React.lazy(() => import('./components/TenantRegistration.tsx').then(m => ({ default: m.TenantRegistration })));
 const ForgotPassword = React.lazy(() => import('./components/ForgotPassword.tsx').then(m => ({ default: m.ForgotPassword })));
 const Logs = React.lazy(() => import('./components/Logs.tsx').then(m => ({ default: m.Logs })));
@@ -509,6 +510,23 @@ const AppRouter: React.FC = () => {
     }
 
     if (!user) {
+        // Check for tenant login route
+        if (path.startsWith('/tenant/') && path.endsWith('/login')) {
+            // Extract tenant slug from path: /tenant/{slug}/login
+            const pathParts = path.split('/');
+            const tenantSlug = pathParts[2];
+            
+            return (
+                <ThemeProvider>
+                    <LocalizationProvider>
+                        <Suspense fallback={<div className="flex h-screen w-screen items-center justify-center"><Loader /></div>}>
+                            <TenantLogin />
+                        </Suspense>
+                    </LocalizationProvider>
+                </ThemeProvider>
+            );
+        }
+        
         if (path === '/' || path === '/home') {
             return (
                 <ThemeProvider>
