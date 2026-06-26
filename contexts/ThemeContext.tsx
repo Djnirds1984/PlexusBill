@@ -35,7 +35,7 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 return storedColor;
             }
         }
-        return 'orange';
+        return 'emerald';
     });
 
     const isDarkMode = useMemo(() => 

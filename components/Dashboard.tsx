@@ -27,7 +27,7 @@ const formatBits = (bits: number): string => {
 // --- COMPONENTS ---
 
 const StatCard: React.FC<{ title: string; children: React.ReactNode; className?: string }> = ({ title, children, className }) => (
-    <div className={`bg-white dark:bg-slate-800 p-6 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm ${className}`}>
+    <div className={`glass-card ${className}`}>
         <h3 className="text-sm font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-4">{title}</h3>
         <div className="space-y-4">
             {children}
@@ -68,9 +68,9 @@ const TrafficCard: React.FC<{
     if (!interfaceName) return <div className="h-full bg-slate-100 dark:bg-slate-800 rounded-xl animate-pulse"></div>;
 
     return (
-        <div className={`bg-white dark:bg-slate-800 rounded-xl border ${isDisabled ? 'border-red-200 dark:border-red-900/50' : 'border-slate-200 dark:border-slate-700'} shadow-sm overflow-hidden flex flex-col h-full relative group transition-colors duration-300`}>
+        <div className={`glass-card border ${isDisabled ? 'border-red-200 dark:border-red-900/50' : 'border-[--glass-border]'} shadow-glass overflow-hidden flex flex-col h-full relative group transition-colors duration-300 hover-lift`}>
             {/* Header */}
-            <div className={`relative p-4 border-b ${isDisabled ? 'border-red-100 dark:border-red-900/30 bg-red-50/50 dark:bg-red-900/10' : 'border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50'} flex flex-col sm:flex-row justify-between items-center gap-4 transition-colors duration-300 min-h-[72px]`}>
+            <div className={`relative p-4 border-b ${isDisabled ? 'border-red-100 dark:border-red-900/30' : 'border-[--glass-border]'} flex flex-col sm:flex-row justify-between items-center gap-4 transition-colors duration-300 min-h-[72px]`}>
                 <div className="flex items-center gap-3 z-10">
                     <div className={`p-2 rounded-lg ${isDisabled ? 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400' : 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400'}`}>
                         <SignalIcon className="w-5 h-5" />

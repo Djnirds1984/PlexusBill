@@ -27,12 +27,12 @@ const NavItem: React.FC<{
     <li>
       <button
         onClick={disabled ? undefined : onClick}
-        className={`flex items-center w-full p-3 text-base rounded-lg transition duration-150 group ${
+        className={`flex items-center w-full p-3 text-base rounded-xl transition-all duration-200 group ${
           isActive
-            ? 'bg-[--color-primary-500]/10 text-[--color-primary-600] dark:text-[--color-primary-300] font-semibold'
+            ? 'gradient-primary text-white shadow-glass font-semibold hover-lift'
             : disabled
-            ? 'text-slate-400 dark:text-slate-600 cursor-not-allowed bg-slate-100 dark:bg-slate-800'
-            : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-700/50'
+            ? 'text-slate-400 dark:text-slate-600 cursor-not-allowed'
+            : 'text-slate-600 dark:text-slate-300 hover:bg-emerald-50/50 dark:hover:bg-slate-700/30 hover-lift'
         }`}
         disabled={disabled}
       >
@@ -137,12 +137,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, setCurrentView, c
 
   return (
     <aside
-      className={`fixed inset-y-0 left-0 z-50 w-64 h-screen bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 transition-transform duration-300 ease-in-out lg:sticky lg:translate-x-0 ${
+      className={`fixed inset-y-0 left-0 z-50 w-64 h-screen glass border-r transition-transform duration-300 ease-in-out lg:sticky lg:translate-x-0 ${
         isOpen ? 'translate-x-0' : '-translate-x-full'
       }`}
       aria-label="Sidebar"
     >
-      <div className="flex items-center justify-between h-16 border-b border-slate-200 dark:border-slate-800 px-4">
+      <div className="flex items-center justify-between h-16 border-b border-[--glass-border] px-4">
           <div className="flex items-center min-w-0">
               {companySettings.logoBase64 ? (
                 <img src={companySettings.logoBase64} alt="Company Logo" className="h-10 w-auto object-contain flex-shrink-0" />

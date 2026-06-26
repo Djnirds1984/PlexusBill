@@ -56,56 +56,58 @@ export const Register: React.FC = () => {
 
     return (
         <div className="w-full max-w-md">
-            <h2 className="text-2xl font-bold text-center text-slate-800 dark:text-slate-200 mb-2">
-                Create Admin Account
-            </h2>
-            <p className="text-center text-sm text-slate-500 dark:text-slate-400 mb-6">Welcome! As the first user, you will be the administrator. Please set up your account and recovery questions.</p>
-            <form onSubmit={handleSubmit} className="space-y-4">
-                {error && (
-                    <div className="p-3 bg-red-100 dark:bg-red-900/30 border border-red-300 dark:border-red-600 rounded-md text-red-700 dark:text-red-300 text-sm">
-                        {error}
+            <div className="glass-card shadow-glass-lg">
+                <h2 className="text-2xl font-bold text-center text-slate-800 dark:text-slate-200 mb-2">
+                    Create Admin Account
+                </h2>
+                <p className="text-center text-sm text-slate-500 dark:text-slate-400 mb-6">Welcome! As the first user, you will be the administrator. Please set up your account and recovery questions.</p>
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    {error && (
+                        <div className="p-3 bg-red-100 dark:bg-red-900/30 border border-red-300 dark:border-red-600 rounded-xl text-red-700 dark:text-red-300 text-sm">
+                            {error}
+                        </div>
+                    )}
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Username</label>
+                        <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} required className="mt-1 block w-full glass-panel px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[--color-primary-500] transition-all"/>
                     </div>
-                )}
-                <div>
-                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Username</label>
-                    <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} required className="mt-1 block w-full bg-slate-100 dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded-md p-2"/>
-                </div>
-                <div>
-                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Password</label>
-                    <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required className="mt-1 block w-full bg-slate-100 dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded-md p-2"/>
-                </div>
-                 <div>
-                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Confirm Password</label>
-                    <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} required className="mt-1 block w-full bg-slate-100 dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded-md p-2"/>
-                </div>
-                
-                <div className="pt-4 border-t border-slate-200 dark:border-slate-700">
-                    <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-200 mb-2">Password Recovery</h3>
-                    <div className="space-y-4">
-                        <div>
-                           <label className="block text-sm font-medium">Question 1</label>
-                           <select value={q1} onChange={e => setQ1(e.target.value)} className="mt-1 w-full p-2 bg-slate-100 dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded-md">{SECURITY_QUESTIONS.map(q => <option key={q} value={q}>{q}</option>)}</select>
-                           <input type="text" placeholder="Answer 1" value={a1} onChange={e => setA1(e.target.value)} required className="mt-2 w-full p-2 bg-slate-100 dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded-md"/>
-                        </div>
-                         <div>
-                           <label className="block text-sm font-medium">Question 2</label>
-                           <select value={q2} onChange={e => setQ2(e.target.value)} className="mt-1 w-full p-2 bg-slate-100 dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded-md">{SECURITY_QUESTIONS.map(q => <option key={q} value={q}>{q}</option>)}</select>
-                           <input type="text" placeholder="Answer 2" value={a2} onChange={e => setA2(e.target.value)} required className="mt-2 w-full p-2 bg-slate-100 dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded-md"/>
-                        </div>
-                         <div>
-                           <label className="block text-sm font-medium">Question 3</label>
-                           <select value={q3} onChange={e => setQ3(e.target.value)} className="mt-1 w-full p-2 bg-slate-100 dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded-md">{SECURITY_QUESTIONS.map(q => <option key={q} value={q}>{q}</option>)}</select>
-                           <input type="text" placeholder="Answer 3" value={a3} onChange={e => setA3(e.target.value)} required className="mt-2 w-full p-2 bg-slate-100 dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded-md"/>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Password</label>
+                        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required className="mt-1 block w-full glass-panel px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[--color-primary-500] transition-all"/>
+                    </div>
+                     <div>
+                        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Confirm Password</label>
+                        <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} required className="mt-1 block w-full glass-panel px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[--color-primary-500] transition-all"/>
+                    </div>
+                    
+                    <div className="pt-4 border-t border-[--glass-border]">
+                        <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-200 mb-2">Password Recovery</h3>
+                        <div className="space-y-4">
+                            <div>
+                               <label className="block text-sm font-medium">Question 1</label>
+                               <select value={q1} onChange={e => setQ1(e.target.value)} className="mt-1 w-full glass-panel px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[--color-primary-500] transition-all">{SECURITY_QUESTIONS.map(q => <option key={q} value={q}>{q}</option>)}</select>
+                               <input type="text" placeholder="Answer 1" value={a1} onChange={e => setA1(e.target.value)} required className="mt-2 w-full glass-panel px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[--color-primary-500] transition-all"/>
+                            </div>
+                             <div>
+                               <label className="block text-sm font-medium">Question 2</label>
+                               <select value={q2} onChange={e => setQ2(e.target.value)} className="mt-1 w-full glass-panel px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[--color-primary-500] transition-all">{SECURITY_QUESTIONS.map(q => <option key={q} value={q}>{q}</option>)}</select>
+                               <input type="text" placeholder="Answer 2" value={a2} onChange={e => setA2(e.target.value)} required className="mt-2 w-full glass-panel px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[--color-primary-500] transition-all"/>
+                            </div>
+                             <div>
+                               <label className="block text-sm font-medium">Question 3</label>
+                               <select value={q3} onChange={e => setQ3(e.target.value)} className="mt-1 w-full glass-panel px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[--color-primary-500] transition-all">{SECURITY_QUESTIONS.map(q => <option key={q} value={q}>{q}</option>)}</select>
+                               <input type="text" placeholder="Answer 3" value={a3} onChange={e => setA3(e.target.value)} required className="mt-2 w-full glass-panel px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[--color-primary-500] transition-all"/>
+                            </div>
                         </div>
                     </div>
-                </div>
 
-                <div>
-                    <button type="submit" disabled={isLoading} className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-[--color-primary-600] hover:bg-[--color-primary-700] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[--color-primary-500] disabled:opacity-50">
-                        {isLoading ? <Loader /> : 'Create Account'}
-                    </button>
-                </div>
-            </form>
+                    <div>
+                        <button type="submit" disabled={isLoading} className="w-full flex justify-center py-3 px-4 gradient-primary text-white rounded-xl shadow-glass hover:shadow-glass-lg transition-all hover:-translate-y-0.5 disabled:opacity-50 font-semibold">
+                            {isLoading ? <Loader /> : 'Create Account'}
+                        </button>
+                    </div>
+                </form>
+            </div>
         </div>
     );
 };
