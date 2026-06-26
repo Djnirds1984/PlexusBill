@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type { ZeroTierNetwork, ZeroTierInfo } from '../types.ts';
 import { getZeroTierStatus, joinZeroTierNetwork, leaveZeroTierNetwork, setZeroTierNetworkSetting, streamInstallZeroTier, restartZeroTierService, deepCleanAndRejoin, runZeroTierDiagnostics, reauthorizeMember } from '../services/zeroTierPanelService.ts';
+import { getAuthHeader } from '../services/databaseService.ts';
 import { Loader } from './Loader.tsx';
 import { TrashIcon, ZeroTierIcon, ExclamationTriangleIcon, CheckCircleIcon, UpdateIcon } from '../constants.tsx';
 import { CodeBlock } from './CodeBlock.tsx';
@@ -109,6 +110,8 @@ export const ZeroTier: React.FC = () => {
     const [deepCleanSteps, setDeepCleanSteps] = useState<string[]>([]);
     const [isRunningDiagnostics, setIsRunningDiagnostics] = useState(false);
     const [diagnosticsResults, setDiagnosticsResults] = useState<any>(null);
+    const [isFixingTun, setIsFixingTun] = useState(false);
+    const [tunFixSteps, setTunFixSteps] = useState<string[]>([]);
 
 
     const fetchData = useCallback(async () => {
@@ -286,6 +289,38 @@ export const ZeroTier: React.FC = () => {
             setErrorMessage(`❌ Diagnostics failed: ${(err as Error).message}`);
         } finally {
             setIsRunningDiagnostics(false);
+        }
+    };
+
+    const handleFixTunDevice = async () => {
+        if (!window.confirm('⚠️ This will fix the ZeroTier TUN/TAP device issue:\n\n1. Load TUN kernel module\n2. Create device node if missing\n3. Restart ZeroTier service\n\nThis fixes the "could not open TUN/TAP device" error.\n\nContinue?')) {
+            return;
+        }
+        
+        setIsFixingTun(true);
+        setTunFixSteps([]);
+        setErrorMessage('');
+        
+        try {
+            const res = await fetch('/api/superadmin/fix-zerotier-tun', {
+                method: 'POST',
+                headers: { ...getAuthHeader(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            
+            const result = await res.json();
+            setTunFixSteps(result.steps);
+            
+            if (result.success) {
+                setErrorMessage('✅ TUN device fix completed! Try joining network again.');
+                await fetchData();
+            } else {
+                setErrorMessage(`❌ Fix completed with errors. Check steps below.`);
+            }
+        } catch (err) {
+            setErrorMessage(`❌ Fix failed: ${(err as Error).message}`);
+        } finally {
+            setIsFixingTun(false);
         }
     };
 
@@ -467,6 +502,14 @@ export const ZeroTier: React.FC = () => {
                     </div>
                     <div className="flex gap-2 flex-wrap">
                         <button 
+                            onClick={handleFixTunDevice} 
+                            disabled={isFixingTun}
+                            className="bg-red-600 hover:bg-red-500 disabled:bg-red-400 text-white font-bold py-2 px-4 rounded-lg self-start sm:self-center flex items-center gap-2"
+                        >
+                            <UpdateIcon className="w-5 h-5" />
+                            {isFixingTun ? 'Fixing...' : 'Fix TUN Device'}
+                        </button>
+                        <button 
                             onClick={handleRestartService} 
                             disabled={isRestarting}
                             className="bg-amber-600 hover:bg-amber-500 disabled:bg-amber-400 text-white font-bold py-2 px-4 rounded-lg self-start sm:self-center flex items-center gap-2"
@@ -550,6 +593,18 @@ export const ZeroTier: React.FC = () => {
                                 <pre className="text-xs bg-slate-100 dark:bg-slate-800 p-2 rounded overflow-x-auto font-mono">{diagnosticsResults.permissions}</pre>
                             </div>
                         </div>
+                    </div>
+                )}
+
+                {/* TUN Fix Steps */}
+                {tunFixSteps.length > 0 && (
+                    <div className="p-4 rounded-lg border bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-700">
+                        <h4 className="font-semibold text-red-900 dark:text-red-100 mb-2">🔧 TUN Device Fix Progress:</h4>
+                        <ol className="list-decimal list-inside space-y-2 text-sm text-red-800 dark:text-red-200 font-mono">
+                            {tunFixSteps.map((step, idx) => (
+                                <li key={idx}>{step}</li>
+                            ))}
+                        </ol>
                     </div>
                 )}
                 

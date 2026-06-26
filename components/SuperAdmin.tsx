@@ -2,18 +2,19 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Loader } from './Loader.tsx';
 import { getAuthHeader } from '../services/databaseService.ts';
 import { CodeBlock } from './CodeBlock.tsx';
-import { LockClosedIcon, TrashIcon, CloudArrowUpIcon, UpdateIcon, ExclamationTriangleIcon, ServerIcon, UsersIcon, ClockIcon } from '../constants.tsx';
+import { LockClosedIcon, TrashIcon, CloudArrowUpIcon, UpdateIcon, ExclamationTriangleIcon, ServerIcon, UsersIcon, ClockIcon, CodeBracketIcon } from '../constants.tsx';
 import { useAuth } from '../contexts/AuthContext.tsx';
 import { CloudflareTunnel } from './CloudflareTunnel.tsx';
 import { ZeroTier } from './ZeroTier.tsx';
 import { PiTunnel } from './PiTunnel.tsx';
 import { NgrokManager } from './NgrokManager.tsx';
 import { Dataplicity } from './Dataplicity.tsx';
+import { SSHTerminal } from './SSHTerminal.tsx';
 import { Updater } from './Updater.tsx';
 import { factoryReset } from '../services/databaseService.ts';
 import { useLocalization } from '../contexts/LocalizationContext.tsx';
 
-type SuperAdminTab = 'backup' | 'zerotier' | 'pitunnel' | 'ngrok' | 'dataplicity' | 'updater' | 'factory-reset' | 'cloudflare' | 'tenant-approval' | 'ntp';
+type SuperAdminTab = 'backup' | 'zerotier' | 'pitunnel' | 'ngrok' | 'dataplicity' | 'updater' | 'factory-reset' | 'cloudflare' | 'tenant-approval' | 'ntp' | 'ssh-terminal';
 
 const TabButton: React.FC<{
     label: string;
@@ -973,6 +974,8 @@ export const SuperAdmin: React.FC = () => {
                 return <TenantApprovalManager />;
             case 'ntp':
                 return <NTPSettingsManager />;
+            case 'ssh-terminal':
+                return <SSHTerminal />;
             default:
                 return <FullBackupManager />;
         }
@@ -1041,6 +1044,12 @@ export const SuperAdmin: React.FC = () => {
                         icon={<ClockIcon className="w-5 h-5"/>} 
                         isActive={activeTab === 'ntp'} 
                         onClick={() => setActiveTab('ntp')} 
+                    />
+                    <TabButton 
+                        label="SSH Terminal" 
+                        icon={<CodeBracketIcon className="w-5 h-5"/>} 
+                        isActive={activeTab === 'ssh-terminal'} 
+                        onClick={() => setActiveTab('ssh-terminal')} 
                     />
                 </nav>
             </div>

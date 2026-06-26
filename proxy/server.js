@@ -10469,7 +10469,134 @@ WantedBy=multi-user.target`;
         }
     });
     
-    // POST /api/superadmin/timezone - Update timezone
+    // SSH Terminal - Execute commands on SBC
+    app.post('/api/superadmin/ssh', protect, requireSuperadmin, async (req, res) => {
+        const { command } = req.body;
+        console.log('[SSH Terminal] Executing command:', command);
+        
+        try {
+            if (!command || !command.trim()) {
+                return res.status(400).json({ error: 'No command provided' });
+            }
+            
+            // Security: Block dangerous commands
+            const blockedCommands = ['rm -rf /', 'mkfs', 'dd if=', 'shutdown now', 'halt', 'poweroff'];
+            const cmdLower = command.toLowerCase();
+            
+            for (const blocked of blockedCommands) {
+                if (cmdLower.includes(blocked)) {
+                    return res.status(403).json({ 
+                        error: `Command blocked for safety: "${blocked}" is not allowed` 
+                    });
+                }
+            }
+            
+            const { exec } = require('child_process');
+            const { promisify } = require('util');
+            const execAsync = promisify(exec);
+            
+            // Execute with 30 second timeout
+            const result = await execAsync(command, { 
+                timeout: 30000,
+                maxBuffer: 1024 * 1024 // 1MB buffer
+            });
+            
+            res.json({ 
+                output: result.stdout,
+                error: result.stderr,
+                exitCode: 0
+            });
+        } catch (err) {
+            console.error('[SSH Terminal] Command failed:', err);
+            res.json({ 
+                output: err.stdout || '',
+                error: err.stderr || err.message,
+                exitCode: err.code || 1
+            });
+        }
+    });
+
+    // POST /api/superadmin/fix-zerotier-tun - Fix ZeroTier TUN/TAP device issue
+    app.post('/api/superadmin/fix-zerotier-tun', protect, requireSuperadmin, async (req, res) => {
+        console.log('[ZeroTier Fix] Attempting to fix TUN/TAP device issue...');
+        
+        const steps = [];
+        const { exec } = require('child_process');
+        const { promisify } = require('util');
+        const execAsync = promisify(exec);
+        
+        try {
+            // Step 1: Check if TUN module exists
+            steps.push('Checking TUN module...');
+            try {
+                await execAsync('modprobe tun');
+                steps.push('✅ TUN module loaded successfully');
+            } catch (e) {
+                steps.push('❌ TUN module not available, trying to create device node...');
+                try {
+                    await execAsync('sudo mkdir -p /dev/net');
+                    await execAsync('sudo mknod /dev/net/tun c 10 200');
+                    await execAsync('sudo chmod 600 /dev/net/tun');
+                    steps.push('✅ TUN device node created');
+                } catch (e2) {
+                    steps.push('❌ Failed to create TUN device: ' + e2.stderr);
+                }
+            }
+            
+            // Step 2: Verify TUN device exists
+            steps.push('Verifying TUN device...');
+            try {
+                await execAsync('ls -la /dev/net/tun');
+                steps.push('✅ TUN device exists');
+            } catch (e) {
+                steps.push('❌ TUN device still missing');
+            }
+            
+            // Step 3: Stop ZeroTier
+            steps.push('Stopping ZeroTier...');
+            await execAsync('sudo systemctl stop zerotier-one');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            steps.push('✅ ZeroTier stopped');
+            
+            // Step 4: Start ZeroTier
+            steps.push('Starting ZeroTier...');
+            await execAsync('sudo systemctl start zerotier-one');
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            steps.push('✅ ZeroTier started');
+            
+            // Step 5: Check if error is gone
+            steps.push('Checking ZeroTier logs for TUN errors...');
+            try {
+                const logs = await execAsync('sudo journalctl -u zerotier-one -n 10 --no-pager');
+                if (logs.stdout.includes('could not open TUN/TAP device')) {
+                    steps.push('❌ TUN error still present in logs');
+                    steps.push('You may need to: sudo apt install -y zerotier-one (reinstall)');
+                } else {
+                    steps.push('✅ No TUN errors found - ZeroTier should work now!');
+                }
+            } catch (e) {
+                steps.push('⚠️ Could not check logs: ' + e.stderr);
+            }
+            
+            // Step 6: Test network join
+            steps.push('Testing ZeroTier status...');
+            try {
+                const status = await execAsync('sudo zerotier-cli status');
+                steps.push('Status: ' + status.stdout.trim());
+            } catch (e) {
+                steps.push('⚠️ Status check failed: ' + e.stderr);
+            }
+            
+            res.json({ success: true, steps });
+        } catch (err) {
+            console.error('[ZeroTier Fix] Failed:', err);
+            res.json({ 
+                success: false, 
+                steps,
+                error: err.message 
+            });
+        }
+    });
     superRouter.post('/timezone', async (req, res) => {
         try {
             const { timezone } = req.body;
