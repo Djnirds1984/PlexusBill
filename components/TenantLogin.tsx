@@ -1,12 +1,21 @@
-import React, { useState } from 'react';
-import { useParams } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
 
 export const TenantLogin: React.FC = () => {
-    const { tenantSlug } = useParams<{ tenantSlug: string }>();
+    const [tenantSlug, setTenantSlug] = useState<string>('');
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+
+    // Extract tenant slug from URL path: /tenant/{slug}/login
+    useEffect(() => {
+        const path = window.location.pathname;
+        const parts = path.split('/');
+        // Path format: /tenant/{slug}/login
+        if (parts.length >= 4 && parts[1] === 'tenant' && parts[3] === 'login') {
+            setTenantSlug(parts[2]);
+        }
+    }, []);
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
