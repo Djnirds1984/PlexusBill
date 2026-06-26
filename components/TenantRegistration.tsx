@@ -7,7 +7,6 @@ interface TenantRegistrationProps {
 export const TenantRegistration: React.FC<TenantRegistrationProps> = ({ onSwitchToLogin }) => {
     const [formData, setFormData] = useState({
         name: '',
-        slug: '',
         adminEmail: '',
         adminUsername: '',
         password: '',
@@ -26,9 +25,12 @@ export const TenantRegistration: React.FC<TenantRegistrationProps> = ({ onSwitch
         setError(null);
     };
 
-    const validateSlug = (slug: string) => {
-        // Alphanumeric and hyphens only, must start with letter
-        return /^[a-z][a-z0-9-]*$/.test(slug);
+    const generateSlug = (name: string) => {
+        // Auto-generate slug from company name
+        return name.toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+            .substring(0, 30);
     };
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -38,11 +40,6 @@ export const TenantRegistration: React.FC<TenantRegistrationProps> = ({ onSwitch
         // Validation
         if (!formData.name.trim()) {
             setError('Company name is required');
-            return;
-        }
-
-        if (!validateSlug(formData.slug)) {
-            setError('Invalid slug format. Use lowercase letters, numbers, and hyphens only. Must start with a letter.');
             return;
         }
 
@@ -69,7 +66,7 @@ export const TenantRegistration: React.FC<TenantRegistrationProps> = ({ onSwitch
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     name: formData.name,
-                    slug: formData.slug,
+                    slug: generateSlug(formData.name),
                     adminEmail: formData.adminEmail,
                     adminUsername: formData.adminUsername,
                     password: formData.password,
@@ -149,30 +146,6 @@ export const TenantRegistration: React.FC<TenantRegistrationProps> = ({ onSwitch
                             placeholder="Acme Internet Services"
                             required
                         />
-                    </div>
-
-                    {/* Tenant Slug */}
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-                            Tenant Slug *
-                        </label>
-                        <div className="flex items-center">
-                            <span className="px-3 py-2 bg-slate-100 dark:bg-slate-700 border border-r-0 border-slate-300 dark:border-slate-600 rounded-l-lg text-slate-500 dark:text-slate-400 text-sm">
-                                plexusbill.com/tenant/
-                            </span>
-                            <input
-                                type="text"
-                                name="slug"
-                                value={formData.slug}
-                                onChange={handleChange}
-                                className="flex-1 px-4 py-2 border border-slate-300 dark:border-slate-600 rounded-r-lg bg-white dark:bg-slate-700 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                                placeholder="acme-isp"
-                                required
-                            />
-                        </div>
-                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                            This will be your unique URL identifier (lowercase letters, numbers, hyphens only)
-                        </p>
                     </div>
 
                     {/* Admin Email */}
