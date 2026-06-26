@@ -40,7 +40,7 @@ const Accounting = React.lazy(() => import('./components/Accounting.tsx').then(m
 const Company = React.lazy(() => import('./components/Company.tsx').then(m => ({ default: m.Company })));
 const Terminal = React.lazy(() => import('./components/Terminal.tsx').then(m => ({ default: m.Terminal })));
 const Login = React.lazy(() => import('./components/Login.tsx').then(m => ({ default: m.Login })));
-const Register = React.lazy(() => import('./components/Register.tsx').then(m => ({ default: m.Register })));
+const TenantRegistration = React.lazy(() => import('./components/TenantRegistration.tsx').then(m => ({ default: m.TenantRegistration })));
 const ForgotPassword = React.lazy(() => import('./components/ForgotPassword.tsx').then(m => ({ default: m.ForgotPassword })));
 const Logs = React.lazy(() => import('./components/Logs.tsx').then(m => ({ default: m.Logs })));
 const PanelRoles = React.lazy(() => import('./components/PanelRoles.tsx').then(m => ({ default: m.PanelRoles })));
@@ -373,7 +373,7 @@ const getCachedLicense = (): LicenseStatus | null => {
 
 const AppRouter: React.FC = () => {
     const { user, isLoading, hasUsers } = useAuth();
-    const [authView, setAuthView] = useState<'login' | 'register' | 'forgot'>('login');
+    const [authView, setAuthView] = useState<'login' | 'tenant-register' | 'forgot'>('login');
     const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(() => getCachedLicense());
     // If we have a cached license, skip the loading screen on refresh
     const [isLicenseLoading, setIsLicenseLoading] = useState(() => getCachedLicense() === null);
@@ -408,15 +408,10 @@ const AppRouter: React.FC = () => {
 
     useEffect(() => {
         if (!isLoading) {
-            if (!hasUsers) {
-                setAuthView('register');
-                console.log('DEBUG: No users found, showing Register');
-            } else {
-                setAuthView('login');
-                console.log('DEBUG: Users exist, showing Login');
-            }
+            setAuthView('login');
+            console.log('DEBUG: Multi-tenant mode - showing Login page');
         }
-    }, [isLoading, hasUsers]);
+    }, [isLoading]);
     
     useEffect(() => {
         if (user) {
@@ -531,11 +526,11 @@ const AppRouter: React.FC = () => {
                     <Suspense fallback={<div className="flex h-screen w-screen items-center justify-center"><Loader /></div>}>
                         <AuthLayout>
                             {path === '/register' ? (
-                                <Register />
-                            ) : !hasUsers ? (
-                                <Register />
+                                <TenantRegistration />
                             ) : authView === 'login' ? (
-                                <Login onSwitchToForgotPassword={() => setAuthView('forgot')} />
+                                <Login onSwitchToForgotPassword={() => setAuthView('forgot')} onSwitchToTenantRegister={() => setAuthView('tenant-register')} />
+                            ) : authView === 'tenant-register' ? (
+                                <TenantRegistration onSwitchToLogin={() => setAuthView('login')} />
                             ) : (
                                 <ForgotPassword onSwitchToLogin={() => setAuthView('login')} />
                             )}

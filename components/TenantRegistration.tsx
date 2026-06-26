@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 
-export const TenantRegistration: React.FC = () => {
-    const navigate = useNavigate();
+interface TenantRegistrationProps {
+    onSwitchToLogin: () => void;
+}
+
+export const TenantRegistration: React.FC<TenantRegistrationProps> = ({ onSwitchToLogin }) => {
     const [formData, setFormData] = useState({
         name: '',
         slug: '',
@@ -83,9 +85,9 @@ export const TenantRegistration: React.FC = () => {
 
             setSuccess(true);
             
-            // Redirect to tenant login after 2 seconds
+            // Switch to login after 2 seconds
             setTimeout(() => {
-                navigate(`/tenant/${formData.slug}/login`);
+                onSwitchToLogin();
             }, 2000);
 
         } catch (err: any) {

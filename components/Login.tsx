@@ -4,9 +4,10 @@ import { Loader } from './Loader.tsx';
 
 interface LoginProps {
     onSwitchToForgotPassword: () => void;
+    onSwitchToTenantRegister: () => void;
 }
 
-export const Login: React.FC<LoginProps> = ({ onSwitchToForgotPassword }) => {
+export const Login: React.FC<LoginProps> = ({ onSwitchToForgotPassword, onSwitchToTenantRegister }) => {
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
     const { login, error, isLoading } = useAuth();
@@ -69,6 +70,17 @@ export const Login: React.FC<LoginProps> = ({ onSwitchToForgotPassword }) => {
                         Forgot Password?
                     </button>
                 </p>
+                <div className="mt-6 pt-6 border-t border-[--glass-border]">
+                    <p className="text-center text-sm text-slate-600 dark:text-slate-400 mb-3">
+                        Don't have an account?
+                    </p>
+                    <button
+                        onClick={onSwitchToTenantRegister}
+                        className="w-full glass-button text-[--color-primary-600] dark:text-[--color-primary-400] font-semibold py-3 rounded-xl hover-lift"
+                    >
+                        Register as New Tenant
+                    </button>
+                </div>
             </div>
         </div>
     );
