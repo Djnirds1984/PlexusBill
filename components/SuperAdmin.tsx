@@ -6,11 +6,14 @@ import { LockClosedIcon, TrashIcon, CloudArrowUpIcon, UpdateIcon, ExclamationTri
 import { useAuth } from '../contexts/AuthContext.tsx';
 import { CloudflareTunnel } from './CloudflareTunnel.tsx';
 import { ZeroTier } from './ZeroTier.tsx';
+import { PiTunnel } from './PiTunnel.tsx';
+import { NgrokManager } from './NgrokManager.tsx';
+import { Dataplicity } from './Dataplicity.tsx';
 import { Updater } from './Updater.tsx';
 import { factoryReset } from '../services/databaseService.ts';
 import { useLocalization } from '../contexts/LocalizationContext.tsx';
 
-type SuperAdminTab = 'backup' | 'zerotier' | 'updater' | 'factory-reset' | 'cloudflare' | 'tenant-approval' | 'ntp';
+type SuperAdminTab = 'backup' | 'zerotier' | 'pitunnel' | 'ngrok' | 'dataplicity' | 'updater' | 'factory-reset' | 'cloudflare' | 'tenant-approval' | 'ntp';
 
 const TabButton: React.FC<{
     label: string;
@@ -880,6 +883,12 @@ export const SuperAdmin: React.FC = () => {
                 return <FullBackupManager />;
             case 'zerotier':
                 return <ZeroTier />;
+            case 'pitunnel':
+                return <PiTunnel />;
+            case 'ngrok':
+                return <NgrokManager />;
+            case 'dataplicity':
+                return <Dataplicity />;
             case 'updater':
                 return <Updater />;
             case 'factory-reset':
@@ -910,6 +919,24 @@ export const SuperAdmin: React.FC = () => {
                         icon={<ServerIcon className="w-5 h-5"/>} 
                         isActive={activeTab === 'zerotier'} 
                         onClick={() => setActiveTab('zerotier')} 
+                    />
+                    <TabButton 
+                        label="PiTunnel" 
+                        icon={<CloudArrowUpIcon className="w-5 h-5"/>} 
+                        isActive={activeTab === 'pitunnel'} 
+                        onClick={() => setActiveTab('pitunnel')} 
+                    />
+                    <TabButton 
+                        label="Ngrok" 
+                        icon={<CloudArrowUpIcon className="w-5 h-5"/>} 
+                        isActive={activeTab === 'ngrok'} 
+                        onClick={() => setActiveTab('ngrok')} 
+                    />
+                    <TabButton 
+                        label="Dataplicity" 
+                        icon={<CloudArrowUpIcon className="w-5 h-5"/>} 
+                        isActive={activeTab === 'dataplicity'} 
+                        onClick={() => setActiveTab('dataplicity')} 
                     />
                     <TabButton 
                         label="Updater" 

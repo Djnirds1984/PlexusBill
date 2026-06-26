@@ -28,7 +28,6 @@ const Updater = React.lazy(() => import('./components/Updater.tsx').then(m => ({
 const Pppoe = React.lazy(() => import('./components/Pppoe.tsx').then(m => ({ default: m.Pppoe })));
 const FacebookClients = React.lazy(() => import('./components/FacebookClients.tsx').then(m => ({ default: m.FacebookClients })));
 const Billing = React.lazy(() => import('./components/Billing.tsx').then(m => ({ default: m.Billing })));
-const Remote = React.lazy(() => import('./components/Remote.tsx').then(m => ({ default: m.Remote })));
 const Hotspot = React.lazy(() => import('./components/Hotspot.tsx').then(m => ({ default: m.Hotspot })));
 const Help = React.lazy(() => import('./components/Help.tsx').then(m => ({ default: m.Help })));
 const SystemSettings = React.lazy(() => import('./components/SystemSettings.tsx').then(m => ({ default: m.SystemSettings })));
@@ -286,8 +285,6 @@ const AppContent: React.FC<AppContentProps> = ({ licenseStatus, onLicenseChange 
                       return <Payroll {...payrollData} onPayrollPaid={handlePayrollPaid} />;
                   case 'hotspot':
                       return <Hotspot selectedRouter={selectedRouter} />;
-                  case 'remote':
-                      return <Remote />;
                   case 'mikrotik_files':
                       return <MikrotikFiles selectedRouter={selectedRouter} />;
                   case 'company':
