@@ -2,9 +2,34 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Loader } from './Loader.tsx';
 import { getAuthHeader } from '../services/databaseService.ts';
 import { CodeBlock } from './CodeBlock.tsx';
-import { LockClosedIcon, TrashIcon } from '../constants.tsx';
+import { LockClosedIcon, TrashIcon, CloudArrowUpIcon, UpdateIcon, ExclamationTriangleIcon, ServerIcon } from '../constants.tsx';
 import { useAuth } from '../contexts/AuthContext.tsx';
 import { CloudflareTunnel } from './CloudflareTunnel.tsx';
+import { ZeroTier } from './ZeroTier.tsx';
+import { Updater } from './Updater.tsx';
+import { factoryReset } from '../services/databaseService.ts';
+import { useLocalization } from '../contexts/LocalizationContext.tsx';
+
+type SuperAdminTab = 'backup' | 'zerotier' | 'updater' | 'factory-reset' | 'cloudflare';
+
+const TabButton: React.FC<{
+    label: string;
+    icon: React.ReactNode;
+    isActive: boolean;
+    onClick: () => void;
+}> = ({ label, icon, isActive, onClick }) => (
+    <button
+        onClick={onClick}
+        className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors duration-200 focus:outline-none ${
+            isActive
+                ? 'border-[--color-primary-500] text-[--color-primary-500] dark:text-[--color-primary-400]'
+                : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+        }`}
+    >
+        {icon}
+        <span className="hidden sm:inline">{label}</span>
+    </button>
+);
 
 // --- Full Backup & Restore Component ---
 const FullBackupManager: React.FC = () => {
@@ -259,6 +284,8 @@ const FullBackupManager: React.FC = () => {
 
 export const SuperAdmin: React.FC = () => {
     const { logout } = useAuth();
+    const { t } = useLocalization();
+    const [activeTab, setActiveTab] = useState<SuperAdminTab>('backup');
     const [newPassword, setNewPassword] = useState('');
     const [confirmPassword, setConfirmPassword] = useState('');
     const [isPasswordSaving, setIsPasswordSaving] = useState(false);
@@ -301,10 +328,63 @@ export const SuperAdmin: React.FC = () => {
         }
     };
 
+    const renderContent = () => {
+        switch (activeTab) {
+            case 'backup':
+                return <FullBackupManager />;
+            case 'zerotier':
+                return <ZeroTier />;
+            case 'updater':
+                return <Updater />;
+            case 'factory-reset':
+                return <FactoryResetManager />;
+            case 'cloudflare':
+                return <CloudflareTunnel />;
+            default:
+                return <FullBackupManager />;
+        }
+    };
 
     return (
-        <div className="max-w-2xl mx-auto space-y-8">
-            <FullBackupManager />
+        <div className="space-y-6">
+            <div className="border-b border-slate-200 dark:border-slate-700">
+                <nav className="flex space-x-2 -mb-px overflow-x-auto" aria-label="Tabs">
+                    <TabButton 
+                        label="Backup & Restore" 
+                        icon={<CloudArrowUpIcon className="w-5 h-5"/>} 
+                        isActive={activeTab === 'backup'} 
+                        onClick={() => setActiveTab('backup')} 
+                    />
+                    <TabButton 
+                        label="ZeroTier" 
+                        icon={<ServerIcon className="w-5 h-5"/>} 
+                        isActive={activeTab === 'zerotier'} 
+                        onClick={() => setActiveTab('zerotier')} 
+                    />
+                    <TabButton 
+                        label="Updater" 
+                        icon={<UpdateIcon className="w-5 h-5"/>} 
+                        isActive={activeTab === 'updater'} 
+                        onClick={() => setActiveTab('updater')} 
+                    />
+                    <TabButton 
+                        label="Factory Reset" 
+                        icon={<ExclamationTriangleIcon className="w-5 h-5"/>} 
+                        isActive={activeTab === 'factory-reset'} 
+                        onClick={() => setActiveTab('factory-reset')} 
+                    />
+                    <TabButton 
+                        label="Cloudflare Tunnel" 
+                        icon={<CloudArrowUpIcon className="w-5 h-5"/>} 
+                        isActive={activeTab === 'cloudflare'} 
+                        onClick={() => setActiveTab('cloudflare')} 
+                    />
+                </nav>
+            </div>
+            
+            <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-md p-6">
+                {renderContent()}
+            </div>
 
             <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-6">
                 <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-3">
@@ -350,8 +430,106 @@ export const SuperAdmin: React.FC = () => {
                     </div>
                 </form>
             </div>
+        </div>
+    );
+};
 
-            <CloudflareTunnel />
+// --- Factory Reset Component ---
+const FactoryResetManager: React.FC = () => {
+    const { t } = useLocalization();
+    const [isResetting, setIsResetting] = useState(false);
+
+    const handleFactoryReset = async () => {
+        const firstConfirm = window.confirm(
+            '⚠️ WARNING: FACTORY RESET\n\n' +
+            'This will DELETE ALL DATA including:\n' +
+            '• All user accounts\n' +
+            '• All customers\n' +
+            '• All routers\n' +
+            '• All sales records\n' +
+            '• All settings\n' +
+            '• All uploaded files\n\n' +
+            '✓ GOOD NEWS: Your system license is stored in the cloud and will be automatically restored after reset.\n\n' +
+            'This action CANNOT be undone!\n\n' +
+            'Are you sure you want to continue?'
+        );
+        
+        if (!firstConfirm) return;
+        
+        const secondConfirm = window.confirm(
+            'FINAL WARNING\n\n' +
+            'You are about to perform a FACTORY RESET.\n' +
+            'The system will restart and return to the first-time setup page.\n' +
+            'Your license will be automatically restored from the cloud.\n\n' +
+            'Click OK to proceed, or Cancel to abort.'
+        );
+        
+        if (!secondConfirm) return;
+        
+        const thirdConfirm = window.prompt(
+            'Type "RESET" in the box below to confirm factory reset:'
+        );
+        
+        if (thirdConfirm !== 'RESET') {
+            alert('Factory reset cancelled. Type "RESET" exactly to confirm.');
+            return;
+        }
+        
+        setIsResetting(true);
+        try {
+            const result = await factoryReset();
+            if (result.success) {
+                alert('Factory reset completed! The system is restarting...\n\nYour license will be automatically restored from the cloud when the system restarts.');
+                localStorage.clear();
+                sessionStorage.clear();
+                setTimeout(() => {
+                    window.location.href = '/register';
+                }, 2000);
+            } else {
+                alert('Factory reset failed: ' + result.message);
+            }
+        } catch (err) {
+            alert('Factory reset error: ' + (err as Error).message);
+        } finally {
+            setIsResetting(false);
+        }
+    };
+
+    return (
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-6">
+            <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-3 mb-6">
+                <ExclamationTriangleIcon className="w-6 h-6 text-red-600" />
+                Factory Reset
+            </h2>
+            <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
+                <div className="flex items-start gap-3">
+                    <svg className="w-6 h-6 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                    </svg>
+                    <div className="flex-1">
+                        <h4 className="text-sm font-semibold text-red-800 dark:text-red-300 mb-2">Danger Zone</h4>
+                        <p className="text-sm text-red-700 dark:text-red-400 mb-4">
+                            Factory reset will permanently delete ALL data and return the system to its initial state. 
+                            This includes all user accounts, customers, routers, sales records, settings, and uploaded files.
+                            <strong className="block mt-1">This action cannot be undone!</strong>
+                        </p>
+                        <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mb-4">
+                            <p className="text-sm text-blue-700 dark:text-blue-400">
+                                <strong>ℹ️ License Recovery:</strong> Your system license is safely stored in the cloud. 
+                                After factory reset, your license will be automatically restored when you access the system again.
+                            </p>
+                        </div>
+                        <button
+                            onClick={handleFactoryReset}
+                            disabled={isResetting}
+                            className="px-6 py-2 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg disabled:opacity-50 flex items-center gap-2"
+                        >
+                            {isResetting && <Loader />}
+                            {isResetting ? 'Resetting...' : '⚠️ Factory Reset'}
+                        </button>
+                    </div>
+                </div>
+            </div>
         </div>
     );
 };
