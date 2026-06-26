@@ -9895,12 +9895,17 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
                 throw e;
             });
             const networksRaw = await runCommand('sudo zerotier-cli listnetworks -j');
+            
+            console.log('[ZeroTier] Raw networks data:', networksRaw);
 
             const info = JSON.parse(infoRaw);
-            const networks = JSON.parse(networksRaw);
+            const networks = networksRaw && networksRaw.trim() ? JSON.parse(networksRaw) : [];
+            
+            console.log('[ZeroTier] Parsed networks:', networks.length);
 
             res.json({ info, networks });
         } catch (error) {
+            console.error('[ZeroTier Status Error]', error);
             if (error.code === 'ZEROTIER_NOT_INSTALLED') {
                 res.json({ info: { online: false, version: '0.0.0', address: 'not_installed' }, networks: [], error: 'NOT_INSTALLED' });
             } else if (error.code === 'SUDO_PASSWORD_REQUIRED') {
@@ -9914,10 +9919,13 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
 
     app.post('/api/zt/join', protect, async (req, res) => {
         const { networkId } = req.body;
+        console.log('[ZeroTier] Joining network:', networkId);
         try {
             const output = await runCommand(`sudo zerotier-cli join ${networkId}`);
+            console.log('[ZeroTier] Join output:', output);
             res.json({ message: output });
         } catch (e) {
+            console.error('[ZeroTier] Join failed:', e);
             res.status(500).json({ message: e.stderr || e.message });
         }
     });
@@ -10200,6 +10208,27 @@ WantedBy=multi-user.target`;
     // --- Super Admin & Full Panel Backups ---
     const superRouter = express.Router();
     superRouter.use(protect, requireSuperadmin);
+    
+    // POST /api/superadmin/restart-panel - Restart all PM2 processes
+    superRouter.post('/restart-panel', async (req, res) => {
+        try {
+            console.log('[SuperAdmin] Panel restart requested by:', req.user.username);
+            
+            // Use the existing triggerPm2Restart function
+            triggerPm2Restart();
+            
+            res.json({ 
+                success: true, 
+                message: 'Panel restart initiated. Services will be back online in 10-15 seconds.' 
+            });
+        } catch (err) {
+            console.error('[SuperAdmin] Restart failed:', err);
+            res.status(500).json({ 
+                success: false, 
+                message: 'Failed to restart panel: ' + err.message 
+            });
+        }
+    });
     
     superRouter.get('/list-full-backups', async (req, res) => {
         try {

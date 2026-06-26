@@ -565,6 +565,41 @@ export const SuperAdmin: React.FC = () => {
     const [isPasswordSaving, setIsPasswordSaving] = useState(false);
     const [passwordError, setPasswordError] = useState<string | null>(null);
     const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
+    const [isRestarting, setIsRestarting] = useState(false);
+    const [restartStatus, setRestartStatus] = useState<string | null>(null);
+
+    const handleRestartPanel = async () => {
+        if (!window.confirm('⚠️ Are you sure you want to restart the panel? This will temporarily disconnect all users.')) {
+            return;
+        }
+        
+        setIsRestarting(true);
+        setRestartStatus('Sending restart command...');
+        
+        try {
+            const res = await fetch('/api/superadmin/restart-panel', {
+                method: 'POST',
+                headers: { ...getAuthHeader(), 'Content-Type': 'application/json' }
+            });
+            
+            const data = await res.json();
+            
+            if (!res.ok) {
+                throw new Error(data.message || 'Failed to restart panel');
+            }
+            
+            setRestartStatus('✅ Panel restart command sent successfully! The panel will be back online in 10-15 seconds.');
+            
+            // Auto-logout after restart
+            setTimeout(() => {
+                logout();
+            }, 5000);
+        } catch (err) {
+            setRestartStatus(`❌ Error: ${(err as Error).message}`);
+        } finally {
+            setIsRestarting(false);
+        }
+    };
 
     const handlePasswordChange = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -662,6 +697,35 @@ export const SuperAdmin: React.FC = () => {
                         onClick={() => setActiveTab('tenant-approval')} 
                     />
                 </nav>
+            </div>
+            
+            {/* Restart Panel Button */}
+            <div className="glass-card">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                    <div>
+                        <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100">Panel Management</h2>
+                        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Restart the panel service to apply changes or fix issues</p>
+                    </div>
+                    <button
+                        onClick={handleRestartPanel}
+                        disabled={isRestarting}
+                        className="px-5 py-2.5 bg-amber-600 hover:bg-amber-500 disabled:bg-amber-400 text-white font-semibold rounded-lg transition-colors flex items-center gap-2"
+                    >
+                        <UpdateIcon className="w-5 h-5" />
+                        {isRestarting ? 'Restarting...' : 'Restart Panel'}
+                    </button>
+                </div>
+                {restartStatus && (
+                    <div className={`mt-4 p-3 rounded-md text-sm ${
+                        restartStatus.startsWith('✅') 
+                            ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300' 
+                            : restartStatus.startsWith('❌')
+                            ? 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'
+                            : 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
+                    }`}>
+                        {restartStatus}
+                    </div>
+                )}
             </div>
             
             <div className="glass-card">

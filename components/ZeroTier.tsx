@@ -183,10 +183,15 @@ export const ZeroTier: React.FC = () => {
     const handleJoin = async (networkId: string) => {
         setIsSubmitting(true);
         try {
-            await joinZeroTierNetwork(networkId);
+            const result = await joinZeroTierNetwork(networkId);
+            console.log('[ZeroTier] Join result:', result);
             setIsModalOpen(false);
-            setTimeout(fetchData, 1000);
+            // Wait longer for ZeroTier to get configuration from controller
+            setTimeout(fetchData, 2000);
+            // Refresh again after 5 seconds to catch delayed configuration
+            setTimeout(fetchData, 5000);
         } catch (err) {
+            console.error('[ZeroTier] Join error:', err);
             alert(`Error joining network: ${(err as Error).message}`);
         } finally {
             setIsSubmitting(false);
