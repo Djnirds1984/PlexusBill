@@ -13,12 +13,42 @@ let open;
 const { WebSocketServer } = require('ws');
 const { Client: SSHClient } = require('ssh2');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 const PORT = 3002;
 
 app.use(cors());
 app.use(express.json());
+
+// JWT Secret (must match the one in proxy/server.js)
+const JWT_SECRET = process.env.JWT_SECRET || 'a-very-weak-secret-key-for-dev-only';
+
+// Middleware to authenticate and extract tenant info from JWT
+const authenticateTenant = async (req, res, next) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            // Skip authentication for routes that don't need it
+            return next();
+        }
+        
+        const token = authHeader.substring(7);
+        const decoded = jwt.verify(token, JWT_SECRET);
+        
+        req.tenantSlug = decoded.tenantSlug || null;
+        req.tenantId = decoded.tenantId || null;
+        req.user = decoded;
+        
+        next();
+    } catch (err) {
+        console.error('[Auth] Invalid token:', err.message);
+        return res.status(401).json({ message: 'Invalid token' });
+    }
+};
+
+// Apply authentication middleware globally
+app.use(authenticateTenant);
 
 // Global timeout middleware to prevent 504 Gateway Timeout from Nginx
 app.use((req, res, next) => {
@@ -46,9 +76,33 @@ app.use((req, res, next) => {
 
 // Database setup - pointing to the proxy's DB
 const DB_PATH = path.resolve(__dirname, '../proxy/panel.db');
+const SUPERADMIN_DB_PATH = path.resolve(__dirname, '../proxy/superadmin.db');
+const TENANT_DB_DIR = path.resolve(__dirname, '../proxy/tenant-databases');
 
 let db;
-async function getDb() {
+let superadminDb;
+const tenantDbCache = new Map();
+
+async function getDb(tenantSlug = null) {
+    // If tenant slug provided, use tenant database
+    if (tenantSlug) {
+        if (tenantDbCache.has(tenantSlug)) {
+            return tenantDbCache.get(tenantSlug);
+        }
+        
+        const tenantDbPath = path.join(TENANT_DB_DIR, `tenant_${tenantSlug}.db`);
+        console.log(`[Backend] Opening tenant DB: ${tenantDbPath}`);
+        
+        const tenantDb = await open({
+            filename: tenantDbPath,
+            driver: sqlite3.Database
+        });
+        
+        tenantDbCache.set(tenantSlug, tenantDb);
+        return tenantDb;
+    }
+    
+    // Otherwise use default panel db (for backwards compatibility)
     if (!db) {
         if (!sqlite3 || !open) {
             try {
@@ -182,10 +236,11 @@ const getRouter = async (req, res, next) => {
         const routerId = req.params.routerId;
         if (!routerId) return res.status(400).json({ message: 'Router ID missing' });
         
-        const database = await getDb();
+        // Use tenant database if tenant slug is available
+        const database = await getDb(req.tenantSlug);
         const router = await database.get('SELECT * FROM routers WHERE id = ?', [routerId]);
         if (!router) {
-            console.warn(`[Backend] Router ID ${routerId} not found in DB.`);
+            console.warn(`[Backend] Router ID ${routerId} not found in ${req.tenantSlug ? 'tenant ' + req.tenantSlug : 'panel'} DB.`);
             return res.status(404).json({ message: 'Router not found' });
         }
         
@@ -1584,7 +1639,7 @@ const onEvent = `/log info message="PPPoE auto-kick: ${String(secretData.name)}"
                     const meta = await writeLegacySafe(client, ['/ppp/secret/print', '?name=' + String(secretData.name)]);
                     let preservedPlanType = '';
                     try { const c = JSON.parse(meta[0]?.comment || '{}'); preservedPlanType = (c.planType || '').toLowerCase(); } catch (_) {}
-                    const db = await getDb(); const row = await db.get('SELECT original_plan_type FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secretData.name)]);
+                    const db = await getDb(req.tenantSlug); const row = await db.get('SELECT original_plan_type FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secretData.name)]);
                     if (row?.original_plan_type) preservedPlanType = (row.original_plan_type || '').toLowerCase();
                     let base = {}; try { base = JSON.parse(meta[0]?.comment || '{}'); } catch (_) {}
                     const merged = { ...base, ...subscriptionData, planType: (subscriptionData.planType || '').toLowerCase() || preservedPlanType };
@@ -1643,7 +1698,7 @@ const onEvent = `/log info message="PPPoE auto-kick: ${String(secretData.name)}"
                         if (Array.isArray(s) && s.length > 0 && s[0]['.id']) await client.write('/system/scheduler/remove', { '.id': s[0]['.id'] });
                         await client.write('/system/scheduler/add', { name: schedName, 'start-date': rosDate, 'start-time': rosTime, interval: '0s', 'on-event': onEvent });
                     } catch (e) { console.warn('[ppp/user/save] scheduler update failed:', e.message); }
-                    const database = await getDb();
+                    const database = await getDb(req.tenantSlug);
                     const nowIso = new Date().toISOString();
                     const originalProfileToStore = String(payload['profile'] || originalProfileVal || '');
                     await database.run('INSERT OR REPLACE INTO ppp_grace (router_id, name, activated_at, expires_at, original_profile, original_plan_type, non_payment_profile, metadata) VALUES (?,?,?,?,?,?,?,?)', [req.params.routerId, String(secretData.name), nowIso, d.toISOString(), originalProfileToStore, (subscriptionData?.planType || '').toLowerCase(), String(subscriptionData?.nonPaymentProfile || ''), JSON.stringify({ graceDays: Number(subscriptionData?.graceDays || 0), graceTime: subscriptionData?.graceTime || null })]);
@@ -1681,7 +1736,7 @@ const onEvent = `/log info message="PPPoE auto-kick: ${String(secretData.name)}"
                 const s = await instance.get(`/ppp/secret?name=${encName}`);
                 let preservedPlanType = '';
                 try { const c = JSON.parse((Array.isArray(s.data) && s.data[0]?.comment) || '{}'); preservedPlanType = (c.planType || '').toLowerCase(); } catch (_) {}
-                const db = await getDb(); const row = await db.get('SELECT original_plan_type FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secretData.name)]);
+                const db = await getDb(req.tenantSlug); const row = await db.get('SELECT original_plan_type FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secretData.name)]);
                 if (row?.original_plan_type) preservedPlanType = (row.original_plan_type || '').toLowerCase();
                 let base = {}; try { base = JSON.parse((Array.isArray(s.data) && s.data[0]?.comment) || '{}'); } catch (_) {}
                 const merged = { ...base, ...subscriptionData, planType: (subscriptionData.planType || '').toLowerCase() || preservedPlanType };
@@ -1704,7 +1759,7 @@ if (shouldKick) {
                 const sch = await instance.get(`/system/scheduler?name=${encodeURIComponent(schedName)}`);
                 if (Array.isArray(sch.data) && sch.data.length > 0) await instance.delete(`/system/scheduler/${sch.data[0]['.id']}`);
                 await instance.put(`/system/scheduler`, { name: schedName, 'start-date': rosDate, 'start-time': rosTime, interval: '0s', 'on-event': onEvent });
-                const database = await getDb();
+                const database = await getDb(req.tenantSlug);
                 const nowIso = new Date().toISOString();
                 const originalProfileToStore = String(payload['profile'] || originalProfileVal || '');
                 await database.run('INSERT OR REPLACE INTO ppp_grace (router_id, name, activated_at, expires_at, original_profile, original_plan_type, non_payment_profile, metadata) VALUES (?,?,?,?,?,?,?,?)', [req.params.routerId, String(secretData.name), nowIso, d.toISOString(), originalProfileToStore, (subscriptionData?.planType || '').toLowerCase(), String(subscriptionData?.nonPaymentProfile || ''), JSON.stringify({ graceDays: Number(subscriptionData?.graceDays || 0), graceTime: subscriptionData?.graceTime || null })]);
@@ -1719,7 +1774,7 @@ if (shouldKick) {
             } catch (e) { console.warn('[ppp/user/save] REST active remove failed:', e.message); }
 
             const savedRes = await instance.get(`/ppp/secret?name=${name}`);
-            const database = await getDb(); await database.run('DELETE FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secretData.name)]);
+            const database = await getDb(req.tenantSlug); await database.run('DELETE FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secretData.name)]);
             res.json(savedRes.data);
         }
     } catch (e) {
@@ -1811,7 +1866,7 @@ const onEvent = `/log info message="PPPoE auto-kick: ${String(secret.name)}"\n:d
                     }
                 } catch (_) {}
                 try { const c = JSON.parse(currentComment || '{}'); preservedPlanType = (c.planType || '').toLowerCase(); } catch (_) {}
-                const db = await getDb(); const row = await db.get('SELECT original_plan_type FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secret.name)]);
+                const db = await getDb(req.tenantSlug); const row = await db.get('SELECT original_plan_type FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secret.name)]);
                 if (row?.original_plan_type) preservedPlanType = (row.original_plan_type || '').toLowerCase();
                 const finalComment = JSON.stringify({ ...commentData, planType: preservedPlanType || (plan.planType || '').toLowerCase() });
                 console.log('[ppp/payment/process] preserve planType:', preservedPlanType || plan.planType || 'unknown');
@@ -1830,7 +1885,7 @@ const onEvent = `/log info message="PPPoE auto-kick: ${String(secret.name)}"\n:d
                 } catch (e) { console.warn('[ppp/payment/process] active remove failed:', e.message); }
                 
                 const saved = await writeLegacySafe(client, ['/ppp/secret/print', '?name=' + String(secret.name)]);
-                const database = await getDb(); await database.run('DELETE FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secret.name)]);
+                const database = await getDb(req.tenantSlug); await database.run('DELETE FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secret.name)]);
                 res.json(saved.map(normalizeLegacyObject));
             } finally { await client.close(); }
         } else {
@@ -1840,7 +1895,7 @@ const onEvent = `/log info message="PPPoE auto-kick: ${String(secret.name)}"\n:d
             if (!Array.isArray(sRes.data) || sRes.data.length === 0) return res.status(404).json({ message: 'PPP secret not found.' });
             const id = sRes.data[0]['.id']; const currentComment = sRes.data[0]['comment']; let preservedPlanType = '';
             try { const c = JSON.parse(currentComment || '{}'); preservedPlanType = (c.planType || '').toLowerCase(); } catch (_) {}
-            const db = await getDb(); const row = await db.get('SELECT original_plan_type FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secret.name)]);
+            const db = await getDb(req.tenantSlug); const row = await db.get('SELECT original_plan_type FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(secret.name)]);
             if (row?.original_plan_type) preservedPlanType = (row.original_plan_type || '').toLowerCase();
             const finalComment = JSON.stringify({ ...commentData, planType: preservedPlanType || (plan.planType || '').toLowerCase() });
             console.log('[ppp/payment/process] preserve planType:', preservedPlanType || plan.planType || 'unknown');
@@ -1867,7 +1922,7 @@ const onEvent = `/log info message="PPPoE auto-kick: ${String(secret.name)}"\n:d
 app.post('/:routerId/ppp/grace/grant', getRouter, async (req, res) => {
     const { name, graceDays, originalPlanType, originalProfile, nonPaymentProfile } = req.body; if (!name || !graceDays) return res.status(400).json({ message: 'name and graceDays are required' });
     try {
-        const database = await getDb();
+        const database = await getDb(req.tenantSlug);
         const existing = await database.get('SELECT * FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(name)]);
         if (existing) return res.status(409).json({ message: 'Grace period already active for this user' });
         const now = new Date(); const activatedAt = now.toISOString(); const expiresAt = new Date(now.getTime() + Number(graceDays) * 86400000);
@@ -1907,7 +1962,7 @@ app.post('/:routerId/ppp/grace/grant', getRouter, async (req, res) => {
 // PPP Grace: Status
 app.get('/:routerId/ppp/grace/status', async (req, res) => {
     const { name } = req.query; if (!name) return res.status(400).json({ message: 'name is required' });
-    try { const database = await getDb(); const row = await database.get('SELECT * FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(name)]); res.json(row || {}); }
+    try { const database = await getDb(req.tenantSlug); const row = await database.get('SELECT * FROM ppp_grace WHERE router_id = ? AND name = ?', [req.params.routerId, String(name)]); res.json(row || {}); }
     catch (e) { const s = e.response ? e.response.status : 500; const m = e.response?.data?.message || e.response?.data?.detail || e.message; res.status(s).json({ message: m }); }
 });
 

@@ -931,6 +931,9 @@ const protect = (req, res, next) => {
     jwt.verify(token, SECRET_KEY, (err, user) => {
         if (err) return res.status(403).json({ message: 'Invalid or expired token.' });
         req.user = user;
+        // Extract tenant info from JWT for multi-tenant isolation
+        req.tenantId = user.tenantId || null;
+        req.tenantSlug = user.tenantSlug || null;
         next();
     });
 };
@@ -1712,6 +1715,25 @@ async function startServer() {
     // Database General API (Protected)
     const dbRouter = express.Router();
     dbRouter.use(protect);
+    
+    // Tenant isolation middleware for db routes
+    dbRouter.use(async (req, res, next) => {
+        // If user has tenant context, use tenant database
+        if (req.tenantSlug && req.tenantId) {
+            try {
+                req.tenantDb = await getTenantDb(req.tenantId, superadminDb);
+                console.log(`[DB Router] Using tenant database: ${req.tenantSlug}`);
+            } catch (err) {
+                console.error('[DB Router] Failed to open tenant database:', err.message);
+                return res.status(500).json({ message: 'Failed to access tenant database' });
+            }
+        } else {
+            // Superadmin or non-tenant user uses panel db
+            req.tenantDb = db;
+            console.log('[DB Router] Using panel database (superadmin)');
+        }
+        next();
+    });
 
     // Generic CRUD handler generator
     const createCrud = (route, table) => {
@@ -1724,7 +1746,8 @@ async function startServer() {
                     query += ` WHERE routerId = ?`;
                     params.push(routerId);
                 }
-                const rows = await db.all(query, params);
+                // Use tenant database instead of panel db
+                const rows = await req.tenantDb.all(query, params);
                 res.json(rows);
             } catch (e) {
                 res.status(500).json({ message: e.message });
@@ -1740,18 +1763,18 @@ async function startServer() {
                 const keys = Object.keys(req.body);
                 const values = Object.values(req.body);
                 const placeholders = keys.map(() => '?').join(',');
-                await db.run(`INSERT INTO ${table} (${keys.join(',')}) VALUES (${placeholders})`, values);
+                await req.tenantDb.run(`INSERT INTO ${table} (${keys.join(',')}) VALUES (${placeholders})`, values);
                 
                 // If this is a sales record, sync to mikrotik sales logs
                 if (table === 'sales_records' && supabase) {
                     try {
                         // Get the created record
                         const createdId = req.body.id;
-                        const createdSale = await db.get('SELECT * FROM sales_records WHERE id = ?', [createdId]);
+                        const createdSale = await req.tenantDb.get('SELECT * FROM sales_records WHERE id = ?', [createdId]);
                         
                         if (createdSale) {
                             // Get license info
-                            const settings = await db.get('SELECT * FROM settings WHERE id = 1');
+                            const settings = await req.tenantDb.get('SELECT * FROM settings WHERE id = 1');
                             if (settings?.licenseKey) {
                                 // Find license in Supabase
                                 const { data: licenseData, error: licenseError } = await supabase
@@ -1762,7 +1785,7 @@ async function startServer() {
 
                                 if (!licenseError && licenseData) {
                                     // Get router info
-                                    const router = await db.get('SELECT * FROM routers WHERE id = ?', [createdSale.routerId]);
+                                    const router = await req.tenantDb.get('SELECT * FROM routers WHERE id = ?', [createdSale.routerId]);
                                     if (router) {
                                         // Find router in Supabase
                                         const { data: routerData, error: routerError } = await supabase
