@@ -53,6 +53,13 @@ export const joinZeroTierNetwork = (networkId: string): Promise<{ message: strin
     });
 };
 
+export const restartZeroTierService = (): Promise<{ message: string }> => {
+    return fetchData<{ message: string }>('/api/zt/restart-service', {
+        method: 'POST',
+        body: JSON.stringify({}),
+    });
+};
+
 export const leaveZeroTierNetwork = (networkId: string): Promise<{ message: string }> => {
     return fetchData<{ message: string }>('/api/zt/leave', {
         method: 'POST',

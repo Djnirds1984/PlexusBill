@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type { ZeroTierNetwork, ZeroTierInfo } from '../types.ts';
-import { getZeroTierStatus, joinZeroTierNetwork, leaveZeroTierNetwork, setZeroTierNetworkSetting, streamInstallZeroTier } from '../services/zeroTierPanelService.ts';
+import { getZeroTierStatus, joinZeroTierNetwork, leaveZeroTierNetwork, setZeroTierNetworkSetting, streamInstallZeroTier, restartZeroTierService } from '../services/zeroTierPanelService.ts';
 import { Loader } from './Loader.tsx';
-import { TrashIcon, ZeroTierIcon, ExclamationTriangleIcon, CheckCircleIcon } from '../constants.tsx';
+import { TrashIcon, ZeroTierIcon, ExclamationTriangleIcon, CheckCircleIcon, UpdateIcon } from '../constants.tsx';
 import { CodeBlock } from './CodeBlock.tsx';
 import { SudoInstructionBox } from './SudoInstructionBox.tsx';
 
@@ -103,6 +103,8 @@ export const ZeroTier: React.FC = () => {
     const [installLogs, setInstallLogs] = useState<{ text: string; isWarning?: boolean; isError?: boolean }[]>([]);
     const [installElapsed, setInstallElapsed] = useState(0);
     const installTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const [isRestarting, setIsRestarting] = useState(false);
+    const [restartMessage, setRestartMessage] = useState<string | null>(null);
 
 
     const fetchData = useCallback(async () => {
@@ -195,6 +197,29 @@ export const ZeroTier: React.FC = () => {
             alert(`Error joining network: ${(err as Error).message}`);
         } finally {
             setIsSubmitting(false);
+        }
+    };
+
+    const handleRestartService = async () => {
+        if (!window.confirm('Restart ZeroTier service? This may temporarily disconnect your remote access.')) {
+            return;
+        }
+        
+        setIsRestarting(true);
+        setRestartMessage('Restarting ZeroTier service...');
+        
+        try {
+            const result = await restartZeroTierService();
+            setRestartMessage('✅ Service restarted! Refreshing status...');
+            
+            // Wait for service to come back up, then refresh
+            setTimeout(async () => {
+                await fetchData();
+                setRestartMessage('Service restarted successfully. Check networks above.');
+            }, 10000);
+        } catch (err) {
+            setRestartMessage(`❌ Failed to restart: ${(err as Error).message}`);
+            setIsRestarting(false);
         }
     };
 
@@ -374,10 +399,32 @@ export const ZeroTier: React.FC = () => {
                         <h2 className="text-3xl font-bold text-slate-900 dark:text-slate-100">ZeroTier Panel Management</h2>
                         <p className="text-slate-500 dark:text-slate-400 mt-1">Manage the ZeroTier service running on this panel's host.</p>
                     </div>
-                    <button onClick={() => setIsModalOpen(true)} className="bg-[--color-primary-600] hover:bg-[--color-primary-500] text-white font-bold py-2 px-4 rounded-lg self-start sm:self-center">
-                        Join Network
-                    </button>
+                    <div className="flex gap-2">
+                        <button 
+                            onClick={handleRestartService} 
+                            disabled={isRestarting}
+                            className="bg-amber-600 hover:bg-amber-500 disabled:bg-amber-400 text-white font-bold py-2 px-4 rounded-lg self-start sm:self-center flex items-center gap-2"
+                        >
+                            <UpdateIcon className="w-5 h-5" />
+                            {isRestarting ? 'Restarting...' : 'Restart Service'}
+                        </button>
+                        <button onClick={() => setIsModalOpen(true)} className="bg-[--color-primary-600] hover:bg-[--color-primary-500] text-white font-bold py-2 px-4 rounded-lg self-start sm:self-center">
+                            Join Network
+                        </button>
+                    </div>
                 </div>
+                
+                {restartMessage && (
+                    <div className={`p-4 rounded-lg border ${
+                        restartMessage.startsWith('✅') 
+                            ? 'bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-700 text-green-700 dark:text-green-300' 
+                            : restartMessage.startsWith('❌')
+                            ? 'bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-700 text-red-700 dark:text-red-300'
+                            : 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-700 text-blue-700 dark:text-blue-300'
+                    }`}>
+                        {restartMessage}
+                    </div>
+                )}
                 
                 <div className="p-4 rounded-lg bg-slate-50 dark:bg-slate-900/50">
                     <SudoInstructionBox />

@@ -9967,6 +9967,19 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
         }
     });
 
+    // POST /api/zt/restart-service - Restart ZeroTier service
+    app.post('/api/zt/restart-service', protect, async (req, res) => {
+        console.log('[ZeroTier] Service restart requested by:', req.user.username);
+        try {
+            const output = await runCommand('sudo systemctl restart zerotier-one');
+            console.log('[ZeroTier] Service restart output:', output);
+            res.json({ message: 'ZeroTier service restarted successfully' });
+        } catch (e) {
+            console.error('[ZeroTier] Service restart failed:', e);
+            res.status(500).json({ message: 'Failed to restart ZeroTier service: ' + (e.stderr || e.message) });
+        }
+    });
+
     app.post('/api/zt/leave', protect, async (req, res) => {
         const { networkId } = req.body;
         try {
