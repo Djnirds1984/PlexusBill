@@ -562,8 +562,39 @@ const NTPSettingsManager: React.FC = () => {
     const [status, setStatus] = useState<'idle' | 'loading' | 'saving' | 'error'>('loading');
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState<string | null>(null);
-    const [ntpServers, setNtpServers] = useState<string>('');
+    const [countryCode, setCountryCode] = useState('PH');
     const [enableNTP, setEnableNTP] = useState(true);
+
+    const countryList = [
+        { code: 'GLOBAL', name: 'Global (Recommended)', flag: '🌍' },
+        { code: 'PH', name: 'Philippines', flag: '🇵🇭' },
+        { code: 'US', name: 'United States', flag: '🇺🇸' },
+        { code: 'GB', name: 'United Kingdom', flag: '🇬🇧' },
+        { code: 'DE', name: 'Germany', flag: '🇩🇪' },
+        { code: 'FR', name: 'France', flag: '🇫🇷' },
+        { code: 'JP', name: 'Japan', flag: '🇯🇵' },
+        { code: 'AU', name: 'Australia', flag: '🇦🇺' },
+        { code: 'CA', name: 'Canada', flag: '🇨🇦' },
+        { code: 'IN', name: 'India', flag: '🇮🇳' },
+        { code: 'BR', name: 'Brazil', flag: '🇧🇷' },
+        { code: 'CN', name: 'China', flag: '🇨🇳' },
+        { code: 'KR', name: 'South Korea', flag: '🇰🇷' },
+        { code: 'SG', name: 'Singapore', flag: '🇸🇬' },
+        { code: 'TH', name: 'Thailand', flag: '🇹🇭' },
+        { code: 'ID', name: 'Indonesia', flag: '🇮🇩' },
+        { code: 'MY', name: 'Malaysia', flag: '🇲🇾' },
+        { code: 'VN', name: 'Vietnam', flag: '🇻🇳' },
+        { code: 'IT', name: 'Italy', flag: '🇮🇹' },
+        { code: 'ES', name: 'Spain', flag: '🇪🇸' },
+        { code: 'NL', name: 'Netherlands', flag: '🇳🇱' },
+        { code: 'RU', name: 'Russia', flag: '🇷🇺' },
+        { code: 'MX', name: 'Mexico', flag: '🇲🇽' },
+        { code: 'AR', name: 'Argentina', flag: '🇦🇷' },
+        { code: 'ZA', name: 'South Africa', flag: '🇿🇦' },
+        { code: 'NG', name: 'Nigeria', flag: '🇳🇬' },
+        { code: 'EG', name: 'Egypt', flag: '🇪🇬' },
+        { code: 'AE', name: 'UAE', flag: '🇦🇪' },
+    ];
 
     const fetchNTPInfo = useCallback(async () => {
         setStatus('loading');
@@ -573,7 +604,6 @@ const NTPSettingsManager: React.FC = () => {
             if (!res.ok) throw new Error('Failed to fetch NTP configuration.');
             const data = await res.json();
             setNtpInfo(data);
-            setNtpServers(data.ntpServers.join('\n'));
             setEnableNTP(data.ntpEnabled);
             setStatus('idle');
         } catch (err) {
@@ -592,19 +622,11 @@ const NTPSettingsManager: React.FC = () => {
         setSuccess(null);
         setStatus('saving');
 
-        const servers = ntpServers.split('\n').map(s => s.trim()).filter(s => s);
-
-        if (servers.length === 0) {
-            setError('At least one NTP server is required.');
-            setStatus('idle');
-            return;
-        }
-
         try {
             const res = await fetch('/api/superadmin/ntp', {
                 method: 'POST',
                 headers: { ...getAuthHeader(), 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ntpServers: servers, enableNTP })
+                body: JSON.stringify({ countryCode, enableNTP })
             });
             
             const data = await res.json();
@@ -676,6 +698,16 @@ const NTPSettingsManager: React.FC = () => {
                                 </span>
                             </div>
                         </div>
+                        {ntpInfo.ntpServers && ntpInfo.ntpServers.length > 0 && (
+                            <div className="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-lg md:col-span-2">
+                                <div className="text-sm text-slate-500 dark:text-slate-400 mb-2">Configured NTP Servers</div>
+                                <div className="font-mono text-xs text-slate-700 dark:text-slate-300 space-y-1">
+                                    {ntpInfo.ntpServers.map((server: string, idx: number) => (
+                                        <div key={idx}>{server}</div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             )}
@@ -689,19 +721,23 @@ const NTPSettingsManager: React.FC = () => {
 
                 <form onSubmit={handleSave} className="space-y-4">
                     <div>
-                        <label htmlFor="ntpServers" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-                            NTP Servers (one per line)
+                        <label htmlFor="country" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+                            Select Country/Region
                         </label>
-                        <textarea
-                            id="ntpServers"
-                            value={ntpServers}
-                            onChange={(e) => setNtpServers(e.target.value)}
-                            rows={5}
-                            className="block w-full bg-slate-100 dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-md py-2 px-3 text-slate-900 dark:text-white font-mono text-sm"
-                            placeholder="pool.ntp.org&#10;time.google.com&#10;time.cloudflare.com"
-                        />
-                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                            Enter one NTP server per line. Common servers: pool.ntp.org, time.google.com, time.cloudflare.com
+                        <select
+                            id="country"
+                            value={countryCode}
+                            onChange={(e) => setCountryCode(e.target.value)}
+                            className="block w-full bg-slate-100 dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-md py-2.5 px-3 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-[--color-primary-500]"
+                        >
+                            {countryList.map(country => (
+                                <option key={country.code} value={country.code}>
+                                    {country.flag} {country.name}
+                                </option>
+                            ))}
+                        </select>
+                        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                            Selecting your country will automatically configure the nearest NTP servers for optimal time synchronization
                         </p>
                     </div>
 
@@ -730,25 +766,26 @@ const NTPSettingsManager: React.FC = () => {
                 </form>
             </div>
 
-            {/* Common NTP Servers */}
-            <div className="glass-card">
-                <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-4">Recommended NTP Servers</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                    <div className="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
-                        <div className="font-semibold text-slate-900 dark:text-slate-100">pool.ntp.org</div>
-                        <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Global NTP pool (recommended)</div>
+            {/* Info Box */}
+            <div className="glass-card bg-blue-50/50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800">
+                <div className="flex gap-3">
+                    <div className="flex-shrink-0">
+                        <svg className="w-6 h-6 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
                     </div>
-                    <div className="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
-                        <div className="font-semibold text-slate-900 dark:text-slate-100">time.google.com</div>
-                        <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Google Public NTP</div>
-                    </div>
-                    <div className="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
-                        <div className="font-semibold text-slate-900 dark:text-slate-100">time.cloudflare.com</div>
-                        <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Cloudflare NTP</div>
-                    </div>
-                    <div className="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
-                        <div className="font-semibold text-slate-900 dark:text-slate-100">time.nist.gov</div>
-                        <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">NIST (US Government)</div>
+                    <div>
+                        <h4 className="text-sm font-semibold text-blue-900 dark:text-blue-300">Why NTP Matters</h4>
+                        <p className="mt-1 text-sm text-blue-800 dark:text-blue-400">
+                            Accurate time synchronization is critical for:
+                        </p>
+                        <ul className="mt-2 text-sm text-blue-800 dark:text-blue-400 space-y-1 list-disc list-inside">
+                            <li>Authentication and security certificates</li>
+                            <li>Network logging and troubleshooting</li>
+                            <li>Database consistency and backups</li>
+                            <li>Scheduled tasks and cron jobs</li>
+                            <li>Remote access services (ZeroTier, SSH)</li>
+                        </ul>
                     </div>
                 </div>
             </div>

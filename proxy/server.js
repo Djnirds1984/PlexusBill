@@ -10345,24 +10345,50 @@ WantedBy=multi-user.target`;
     // POST /api/superadmin/ntp - Update NTP configuration
     superRouter.post('/ntp', async (req, res) => {
         try {
-            const { ntpServers, enableNTP } = req.body;
-            console.log('[SuperAdmin] Updating NTP configuration:', { ntpServers, enableNTP });
+            const { countryCode, enableNTP } = req.body;
+            console.log('[SuperAdmin] Updating NTP configuration:', { countryCode, enableNTP });
             
             const { exec } = require('child_process');
             const { promisify } = require('util');
             const execAsync = promisify(exec);
             
-            if (!ntpServers || !Array.isArray(ntpServers) || ntpServers.length === 0) {
-                return res.status(400).json({ message: 'At least one NTP server is required' });
+            if (!countryCode) {
+                return res.status(400).json({ message: 'Country selection is required' });
             }
             
-            // Validate NTP server format
-            const ntpRegex = /^[a-zA-Z0-9.-]+$/;
-            for (const server of ntpServers) {
-                if (!ntpRegex.test(server)) {
-                    return res.status(400).json({ message: `Invalid NTP server format: ${server}` });
-                }
-            }
+            // Map country codes to NTP pool servers
+            const ntpPoolMap = {
+                'GLOBAL': ['0.pool.ntp.org', '1.pool.ntp.org', '2.pool.ntp.org', '3.pool.ntp.org'],
+                'US': ['0.us.pool.ntp.org', '1.us.pool.ntp.org', '2.us.pool.ntp.org'],
+                'PH': ['0.ph.pool.ntp.org', '1.ph.pool.ntp.org', '2.ph.pool.ntp.org'],
+                'GB': ['0.uk.pool.ntp.org', '1.uk.pool.ntp.org', '2.uk.pool.ntp.org'],
+                'DE': ['0.de.pool.ntp.org', '1.de.pool.ntp.org', '2.de.pool.ntp.org'],
+                'FR': ['0.fr.pool.ntp.org', '1.fr.pool.ntp.org', '2.fr.pool.ntp.org'],
+                'JP': ['0.jp.pool.ntp.org', '1.jp.pool.ntp.org', '2.jp.pool.ntp.org'],
+                'AU': ['0.au.pool.ntp.org', '1.au.pool.ntp.org', '2.au.pool.ntp.org'],
+                'CA': ['0.ca.pool.ntp.org', '1.ca.pool.ntp.org', '2.ca.pool.ntp.org'],
+                'IN': ['0.in.pool.ntp.org', '1.in.pool.ntp.org', '2.in.pool.ntp.org'],
+                'BR': ['0.br.pool.ntp.org', '1.br.pool.ntp.org', '2.br.pool.ntp.org'],
+                'CN': ['0.cn.pool.ntp.org', '1.cn.pool.ntp.org', '2.cn.pool.ntp.org'],
+                'KR': ['0.kr.pool.ntp.org', '1.kr.pool.ntp.org', '2.kr.pool.ntp.org'],
+                'SG': ['0.sg.pool.ntp.org', '1.sg.pool.ntp.org', '2.sg.pool.ntp.org'],
+                'TH': ['0.th.pool.ntp.org', '1.th.pool.ntp.org', '2.th.pool.ntp.org'],
+                'ID': ['0.id.pool.ntp.org', '1.id.pool.ntp.org', '2.id.pool.ntp.org'],
+                'MY': ['0.my.pool.ntp.org', '1.my.pool.ntp.org', '2.my.pool.ntp.org'],
+                'VN': ['0.vn.pool.ntp.org', '1.vn.pool.ntp.org', '2.vn.pool.ntp.org'],
+                'IT': ['0.it.pool.ntp.org', '1.it.pool.ntp.org', '2.it.pool.ntp.org'],
+                'ES': ['0.es.pool.ntp.org', '1.es.pool.ntp.org', '2.es.pool.ntp.org'],
+                'NL': ['0.nl.pool.ntp.org', '1.nl.pool.ntp.org', '2.nl.pool.ntp.org'],
+                'RU': ['0.ru.pool.ntp.org', '1.ru.pool.ntp.org', '2.ru.pool.ntp.org'],
+                'MX': ['0.mx.pool.ntp.org', '1.mx.pool.ntp.org', '2.mx.pool.ntp.org'],
+                'AR': ['0.ar.pool.ntp.org', '1.ar.pool.ntp.org', '2.ar.pool.ntp.org'],
+                'ZA': ['0.za.pool.ntp.org', '1.za.pool.ntp.org', '2.za.pool.ntp.org'],
+                'NG': ['0.ng.pool.ntp.org', '1.ng.pool.ntp.org', '2.ng.pool.ntp.org'],
+                'EG': ['0.eg.pool.ntp.org', '1.eg.pool.ntp.org', '2.eg.pool.ntp.org'],
+                'AE': ['0.ae.pool.ntp.org', '1.ae.pool.ntp.org', '2.ae.pool.ntp.org'],
+            };
+            
+            const ntpServers = ntpPoolMap[countryCode] || ntpPoolMap['GLOBAL'];
             
             // Update timesyncd configuration
             const serversString = ntpServers.join(' ');
@@ -10382,11 +10408,12 @@ FallbackNTP=0.pool.ntp.org 1.pool.ntp.org
                 await execAsync('sudo timedatectl set-ntp false');
             }
             
-            console.log('[SuperAdmin] NTP configuration updated successfully');
+            console.log('[SuperAdmin] NTP configuration updated successfully for country:', countryCode);
             
             res.json({ 
                 success: true, 
-                message: 'NTP configuration updated successfully. Changes will take effect shortly.' 
+                message: `NTP configuration updated for ${countryCode === 'GLOBAL' ? 'Global' : countryCode} servers. Changes will take effect shortly.`,
+                ntpServers: ntpServers
             });
         } catch (err) {
             console.error('[SuperAdmin] Failed to update NTP config:', err);
