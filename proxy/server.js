@@ -9907,15 +9907,35 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
             const networksRaw = await runCommand('sudo zerotier-cli listnetworks -j');
             
             console.log('[ZeroTier] Raw networks data:', networksRaw);
+            console.log('[ZeroTier] Networks data type:', typeof networksRaw);
             console.log('[ZeroTier] Networks data length:', networksRaw ? networksRaw.length : 0);
-
-            const networks = networksRaw && networksRaw.trim() && networksRaw.trim() !== '[]' ? JSON.parse(networksRaw) : [];
+            
+            // Try to parse, handle various edge cases
+            let networks = [];
+            try {
+                if (networksRaw && networksRaw.trim()) {
+                    networks = JSON.parse(networksRaw);
+                    if (!Array.isArray(networks)) {
+                        console.warn('[ZeroTier] listnetworks did not return an array:', networks);
+                        networks = [];
+                    }
+                }
+            } catch (parseError) {
+                console.error('[ZeroTier] Failed to parse networks JSON:', parseError.message);
+                console.error('[ZeroTier] Raw data was:', networksRaw);
+                networks = [];
+            }
             
             console.log('[ZeroTier] Parsed networks:', networks.length);
             if (networks.length > 0) {
                 networks.forEach((net, i) => {
                     console.log(`[ZeroTier] Network ${i}:`, net.nwid, 'Status:', net.status, 'Name:', net.name);
                 });
+            } else {
+                console.warn('[ZeroTier] No networks found. This could mean:');
+                console.warn('  1. Networks not authorized yet (check ZeroTier Central)');
+                console.warn('  2. ZeroTier service needs restart: sudo systemctl restart zerotier-one');
+                console.warn('  3. Network configuration not received from controller');
             }
 
             res.json({ info, networks });
