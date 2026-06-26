@@ -667,10 +667,12 @@ const NTPSettingsManager: React.FC = () => {
                 body: JSON.stringify({ timezone: selectedTimezone })
             });
             
+            const tzData = await tzRes.json();
             if (!tzRes.ok) {
-                const tzData = await tzRes.json();
                 throw new Error(tzData.message || 'Failed to update timezone');
             }
+            
+            console.log('[NTP Settings] Timezone updated:', tzData);
             
             // Save NTP
             const ntpRes = await fetch('/api/superadmin/ntp', {
@@ -682,7 +684,7 @@ const NTPSettingsManager: React.FC = () => {
             const ntpData = await ntpRes.json();
             if (!ntpRes.ok) throw new Error(ntpData.message || 'Failed to update NTP configuration.');
             
-            setSuccess(`✅ Timezone and NTP configuration updated successfully!`);
+            setSuccess(`✅ Timezone changed to ${selectedTimezone} and NTP updated!`);
             await fetchNTPInfo();
         } catch (err) {
             setError((err as Error).message);

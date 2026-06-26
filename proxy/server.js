@@ -10364,19 +10364,31 @@ WantedBy=multi-user.target`;
                 return res.status(400).json({ message: 'Invalid timezone format. Expected: Region/City' });
             }
             
-            // Set timezone
-            await execAsync(`sudo timedatectl set-timezone ${timezone}`);
+            // Verify timezone exists
+            try {
+                await execAsync(`timedatectl list-timezones | grep -q "^${timezone}$"`);
+            } catch (e) {
+                return res.status(400).json({ message: `Invalid timezone: ${timezone}. Timezone not found in system.` });
+            }
             
-            console.log('[SuperAdmin] Timezone updated successfully');
+            // Set timezone with sudo
+            const result = await execAsync(`sudo timedatectl set-timezone ${timezone}`);
+            console.log('[SuperAdmin] Timezone set command result:', result);
+            
+            // Verify the change
+            const verifyResult = await execAsync('timedatectl show --property=Timezone --value');
+            console.log('[SuperAdmin] Verified timezone is now:', verifyResult.stdout.trim());
             
             res.json({ 
                 success: true, 
-                message: `Timezone updated to ${timezone}` 
+                message: `Timezone updated to ${timezone}`,
+                newTimezone: verifyResult.stdout.trim()
             });
         } catch (err) {
             console.error('[SuperAdmin] Failed to update timezone:', err);
             res.status(500).json({ 
-                message: 'Failed to update timezone: ' + err.message 
+                message: 'Failed to update timezone: ' + err.message,
+                details: err.stderr || err.stdout || ''
             });
         }
     });
