@@ -10,8 +10,7 @@ export const TenantRegistration: React.FC<TenantRegistrationProps> = ({ onSwitch
         adminEmail: '',
         adminUsername: '',
         password: '',
-        confirmPassword: '',
-        tier: 'free'
+        confirmPassword: ''
     });
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -69,8 +68,7 @@ export const TenantRegistration: React.FC<TenantRegistrationProps> = ({ onSwitch
                     slug: generateSlug(formData.name),
                     adminEmail: formData.adminEmail,
                     adminUsername: formData.adminUsername,
-                    password: formData.password,
-                    tier: formData.tier
+                    password: formData.password
                 })
             });
 
@@ -210,23 +208,6 @@ export const TenantRegistration: React.FC<TenantRegistrationProps> = ({ onSwitch
                             placeholder="Re-enter password"
                             required
                         />
-                    </div>
-
-                    {/* Subscription Tier */}
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-                            Subscription Tier
-                        </label>
-                        <select
-                            name="tier"
-                            value={formData.tier}
-                            onChange={handleChange}
-                            className="w-full px-4 py-2 border border-slate-300 dark:border-slate-600 rounded-lg bg-white dark:bg-slate-700 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        >
-                            <option value="free">Free Trial (14 days)</option>
-                            <option value="standard">Standard</option>
-                            <option value="premium">Premium</option>
-                        </select>
                     </div>
 
                     {/* Submit Button */}

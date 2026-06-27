@@ -1232,7 +1232,7 @@ async function startServer() {
     
     // POST /api/tenants/register - Self-service tenant registration
     app.post('/api/tenants/register', async (req, res) => {
-        const { name, slug, adminEmail, adminUsername, password, tier } = req.body;
+        const { name, slug, adminEmail, adminUsername, password } = req.body;
         
         try {
             // Validate slug format (alphanumeric and hyphens only, must start with letter)
@@ -1269,13 +1269,13 @@ async function startServer() {
                 INSERT INTO tenants (id, slug, name, admin_email, admin_username, admin_password_hash, 
                                     subscription_tier, trial_ends_at, status, approval_status, database_path)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', ?)
-            `, tenantId, slug, name, adminEmail, adminUsername, passwordHash, tier || 'free', trialEndsAt.toISOString(), dbPath);
+            `, tenantId, slug, name, adminEmail, adminUsername, passwordHash, 'free', trialEndsAt.toISOString(), dbPath);
             
             // Log activity
             await superadminDb.run(`
                 INSERT INTO tenant_activity_logs (id, tenant_id, action, details)
                 VALUES (?, ?, 'tenant_registered', ?)
-            `, `log_${Date.now()}`, tenantId, JSON.stringify({ email: adminEmail, tier }));
+            `, `log_${Date.now()}`, tenantId, JSON.stringify({ email: adminEmail }));
             
             res.status(201).json({
                 success: true,
@@ -3002,23 +3002,23 @@ async function startServer() {
         }
     });
 
-    // Notifications
+    // Notifications - Tenant Isolated
     dbRouter.get('/notifications', async (req, res) => {
-        const rows = await db.all('SELECT * FROM notifications ORDER BY timestamp DESC LIMIT 100');
+        const rows = await req.tenantDb.all('SELECT * FROM notifications ORDER BY timestamp DESC LIMIT 100');
         res.json(rows);
     });
     dbRouter.post('/notifications', async (req, res) => {
         const { id, type, message, is_read, timestamp, link_to, context_json } = req.body;
-        await db.run('INSERT INTO notifications (id, type, message, is_read, timestamp, link_to, context_json) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        await req.tenantDb.run('INSERT INTO notifications (id, type, message, is_read, timestamp, link_to, context_json) VALUES (?, ?, ?, ?, ?, ?, ?)',
             [id, type, message, is_read, timestamp, link_to, context_json]);
         res.json({ message: 'Added' });
     });
     dbRouter.patch('/notifications/:id', async (req, res) => {
-        await db.run('UPDATE notifications SET is_read = ? WHERE id = ?', [req.body.is_read, req.params.id]);
+        await req.tenantDb.run('UPDATE notifications SET is_read = ? WHERE id = ?', [req.body.is_read, req.params.id]);
         res.json({ message: 'Updated' });
     });
     dbRouter.post('/notifications/clear-all', async (req, res) => {
-        await db.run('DELETE FROM notifications');
+        await req.tenantDb.run('DELETE FROM notifications');
         res.json({ message: 'Cleared' });
     });
     
