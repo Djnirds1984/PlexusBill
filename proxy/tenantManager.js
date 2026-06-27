@@ -158,7 +158,9 @@ async function initializeTenantSchema(db) {
             cycle TEXT NOT NULL,
             pppoeProfile TEXT,
             description TEXT,
-            currency TEXT
+            currency TEXT,
+            cycle_days INTEGER DEFAULT 30,
+            store_enabled INTEGER DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS sales_records (
             id TEXT PRIMARY KEY,
