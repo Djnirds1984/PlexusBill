@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Loader } from './Loader.tsx';
-import { getAuthHeader } from '../services/databaseService.ts';
+import { getAuthHeader, getPanelSettings, savePanelSettings } from '../services/databaseService.ts';
 import { CodeBlock } from './CodeBlock.tsx';
-import { LockClosedIcon, TrashIcon, CloudArrowUpIcon, UpdateIcon, ExclamationTriangleIcon, ServerIcon, UsersIcon, ClockIcon, CodeBracketIcon } from '../constants.tsx';
+import { LockClosedIcon, TrashIcon, CloudArrowUpIcon, UpdateIcon, ExclamationTriangleIcon, ServerIcon, UsersIcon, ClockIcon, CodeBracketIcon, KeyIcon, ShareIcon } from '../constants.tsx';
 import { useAuth } from '../contexts/AuthContext.tsx';
 import { CloudflareTunnel } from './CloudflareTunnel.tsx';
 import { ZeroTier } from './ZeroTier.tsx';
@@ -11,10 +11,14 @@ import { NgrokManager } from './NgrokManager.tsx';
 import { Dataplicity } from './Dataplicity.tsx';
 import { SSHTerminal } from './SSHTerminal.tsx';
 import { Updater } from './Updater.tsx';
+import { License } from './License.tsx';
+import { LandingPageSettings } from './LandingPageSettings.tsx';
 import { factoryReset } from '../services/databaseService.ts';
 import { useLocalization } from '../contexts/LocalizationContext.tsx';
+import type { PanelSettings } from '../types.ts';
+import { WanSettingsPanel } from './WanSettingsPanel.tsx';
 
-type SuperAdminTab = 'backup' | 'zerotier' | 'pitunnel' | 'ngrok' | 'dataplicity' | 'updater' | 'factory-reset' | 'cloudflare' | 'tenant-approval' | 'ntp' | 'ssh-terminal';
+type SuperAdminTab = 'backup' | 'zerotier' | 'pitunnel' | 'ngrok' | 'dataplicity' | 'updater' | 'factory-reset' | 'cloudflare' | 'tenant-approval' | 'ntp' | 'ssh-terminal' | 'license' | 'wan' | 'landing-page';
 
 const TabButton: React.FC<{
     label: string;
@@ -1167,6 +1171,12 @@ export const SuperAdmin: React.FC = () => {
                 return <NTPSettingsManager />;
             case 'ssh-terminal':
                 return <SSHTerminal />;
+            case 'license':
+                return <License onLicenseChange={() => {}} licenseStatus={null} />;
+            case 'wan':
+                return <WanSettingsPanel />;
+            case 'landing-page':
+                return <LandingPageSettings />;
             default:
                 return <FullBackupManager />;
         }
@@ -1241,6 +1251,24 @@ export const SuperAdmin: React.FC = () => {
                         icon={<CodeBracketIcon className="w-5 h-5"/>} 
                         isActive={activeTab === 'ssh-terminal'} 
                         onClick={() => setActiveTab('ssh-terminal')} 
+                    />
+                    <TabButton 
+                        label="License" 
+                        icon={<KeyIcon className="w-5 h-5"/>} 
+                        isActive={activeTab === 'license'} 
+                        onClick={() => setActiveTab('license')} 
+                    />
+                    <TabButton 
+                        label="WAN Settings" 
+                        icon={<ShareIcon className="w-5 h-5"/>} 
+                        isActive={activeTab === 'wan'} 
+                        onClick={() => setActiveTab('wan')} 
+                    />
+                    <TabButton 
+                        label="Landing Page" 
+                        icon={<ShareIcon className="w-5 h-5"/>} 
+                        isActive={activeTab === 'landing-page'} 
+                        onClick={() => setActiveTab('landing-page')} 
                     />
                 </nav>
             </div>
