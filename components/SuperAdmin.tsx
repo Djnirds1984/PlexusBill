@@ -561,6 +561,7 @@ const TenantApprovalManager: React.FC = () => {
                                     <th className="text-left px-6 py-4 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Tenant</th>
                                     <th className="text-left px-6 py-4 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Admin</th>
                                     <th className="text-left px-6 py-4 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Status</th>
+                                    <th className="text-left px-6 py-4 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Subscription</th>
                                     <th className="text-left px-6 py-4 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Created</th>
                                     <th className="text-right px-6 py-4 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Actions</th>
                                 </tr>
@@ -585,13 +586,26 @@ const TenantApprovalManager: React.FC = () => {
                                                 <span className={`inline-block px-2 py-1 text-xs font-medium rounded-full ${getStatusBadge(tenant.approval_status)}`}>
                                                     {tenant.approval_status}
                                                 </span>
-                                                {tenant.approval_status === 'approved' && getSubscriptionBadge(tenant.subscription_ends_at)}
                                                 {tenant.approved_by && (
                                                     <div className="text-xs text-slate-500 dark:text-slate-400">
                                                         by {tenant.approved_by}
                                                     </div>
                                                 )}
                                             </div>
+                                        </td>
+                                        <td className="px-6 py-4">
+                                            {tenant.approval_status === 'approved' ? (
+                                                <div className="space-y-1">
+                                                    {getSubscriptionBadge(tenant.subscription_ends_at)}
+                                                    {tenant.subscription_tier && (
+                                                        <div className="text-xs text-slate-500 dark:text-slate-400">
+                                                            Plan: {tenant.subscription_tier}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ) : (
+                                                <span className="text-xs text-slate-400 dark:text-slate-500">N/A</span>
+                                            )}
                                         </td>
                                         <td className="px-6 py-4 text-sm text-slate-600 dark:text-slate-400">
                                             {formatDate(tenant.created_at)}

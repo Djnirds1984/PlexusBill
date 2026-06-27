@@ -149,6 +149,9 @@ export const Dashboard: React.FC<{ selectedRouter: RouterConfigWithId | null }> 
     const user = userStr ? JSON.parse(userStr) : null;
     const isSuperadmin = user?.role?.name?.toLowerCase() === 'superadmin';
     
+    // Subscription status for tenants
+    const [subscriptionInfo, setSubscriptionInfo] = useState<{ endsAt: string | null; daysLeft: number; isExpired: boolean } | null>(null);
+    
     // Interface Names List
     const [availableInterfaces, setAvailableInterfaces] = useState<string[]>([]);
     const [interfaceDetails, setInterfaceDetails] = useState<Interface[]>([]); // Full interface details for status
@@ -180,6 +183,25 @@ export const Dashboard: React.FC<{ selectedRouter: RouterConfigWithId | null }> 
     const rateHistoryRef = useRef<Record<string, { rx: number[]; tx: number[] }>>({});
 
     // --- DATA FETCHING ---
+
+    // 0. Fetch Subscription Info (For Tenants Only)
+    useEffect(() => {
+        // Only show for tenant users, not superadmin
+        if (isSuperadmin) return;
+        
+        if (user?.subscriptionEndsAt) {
+            const now = new Date();
+            const endsAt = new Date(user.subscriptionEndsAt);
+            const diffMs = endsAt.getTime() - now.getTime();
+            const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+            
+            setSubscriptionInfo({
+                endsAt: user.subscriptionEndsAt,
+                daysLeft: diffDays,
+                isExpired: diffDays < 0
+            });
+        }
+    }, [isSuperadmin, user]);
 
     // 1. Fetch Host Status (Separate Interval) - Only for Superadmin
     useEffect(() => {
@@ -494,7 +516,7 @@ export const Dashboard: React.FC<{ selectedRouter: RouterConfigWithId | null }> 
     return (
         <div className="space-y-6">
             {/* TOP: STATUS CARDS */}
-            <div className={`grid gap-6 ${isSuperadmin ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}>
+            <div className={`grid gap-6 ${isSuperadmin ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1 md:grid-cols-2'}`}>
                 {isSuperadmin && (
                     <StatCard title="Panel Host Status">
                         {!hostStatus ? <div className="flex items-center justify-center h-24"><Loader /></div> : (
@@ -517,6 +539,66 @@ export const Dashboard: React.FC<{ selectedRouter: RouterConfigWithId | null }> 
                         )}
                     </StatCard>
                 )}
+                
+                {/* Subscription Status Card - Only for Tenants */}
+                {!isSuperadmin && subscriptionInfo && (
+                    <StatCard title="Subscription Status">
+                        <div className="flex items-center gap-4">
+                            <div className={`flex-shrink-0 w-16 h-16 rounded-full flex items-center justify-center ${
+                                subscriptionInfo.isExpired 
+                                    ? 'bg-red-100 dark:bg-red-900/30' 
+                                    : subscriptionInfo.daysLeft <= 7 
+                                        ? 'bg-orange-100 dark:bg-orange-900/30'
+                                        : subscriptionInfo.daysLeft <= 30
+                                            ? 'bg-yellow-100 dark:bg-yellow-900/30'
+                                            : 'bg-emerald-100 dark:bg-emerald-900/30'
+                            }`}>
+                                <svg className={`w-8 h-8 ${
+                                    subscriptionInfo.isExpired 
+                                        ? 'text-red-600 dark:text-red-400'
+                                        : subscriptionInfo.daysLeft <= 7 
+                                            ? 'text-orange-600 dark:text-orange-400'
+                                            : subscriptionInfo.daysLeft <= 30
+                                                ? 'text-yellow-600 dark:text-yellow-400'
+                                                : 'text-emerald-600 dark:text-emerald-400'
+                                }`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                            </div>
+                            <div className="flex-1">
+                                {subscriptionInfo.isExpired ? (
+                                    <div>
+                                        <p className="text-2xl font-bold text-red-600 dark:text-red-400">Expired</p>
+                                        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                                            Expired on {new Date(subscriptionInfo.endsAt || '').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+                                        </p>
+                                    </div>
+                                ) : subscriptionInfo.daysLeft === 0 ? (
+                                    <div>
+                                        <p className="text-2xl font-bold text-red-600 dark:text-red-400">Expires Today</p>
+                                        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Renew now to avoid service interruption</p>
+                                    </div>
+                                ) : (
+                                    <div>
+                                        <p className={`text-3xl font-bold ${
+                                            subscriptionInfo.daysLeft <= 7 
+                                                ? 'text-orange-600 dark:text-orange-400'
+                                                : subscriptionInfo.daysLeft <= 30
+                                                    ? 'text-yellow-600 dark:text-yellow-400'
+                                                    : 'text-emerald-600 dark:text-emerald-400'
+                                        }`}>
+                                            {subscriptionInfo.daysLeft} Days Left
+                                        </p>
+                                        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                                            Expires on {new Date(subscriptionInfo.endsAt || '').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </StatCard>
+                )}
+                
                 <StatCard title={`Router Status: ${selectedRouter.name}`}>
                     {systemInfo ? (
                         <div className="grid grid-cols-2 gap-4">
