@@ -344,5 +344,7 @@ async function createDefaultTenantAdmin(db, username, password) {
 module.exports = {
     createTenantDatabase,
     getTenantDb,
-    closeTenantDb
+    closeTenantDb,
+    initializeTenantSchema,
+    seedDefaultRoles
 };
