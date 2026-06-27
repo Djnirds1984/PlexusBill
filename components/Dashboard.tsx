@@ -145,8 +145,19 @@ export const Dashboard: React.FC<{ selectedRouter: RouterConfigWithId | null }> 
     const [pppoeCount, setPppoeCount] = useState<number>(0);
     
     // Get user from localStorage to check role
-    const userStr = localStorage.getItem('user');
-    const user = userStr ? JSON.parse(userStr) : null;
+    const [user, setUser] = useState<any>(null);
+    
+    useEffect(() => {
+        const userStr = localStorage.getItem('user');
+        if (userStr) {
+            try {
+                setUser(JSON.parse(userStr));
+            } catch (e) {
+                console.error('Failed to parse user from localStorage:', e);
+            }
+        }
+    }, []);
+    
     const isSuperadmin = user?.role?.name?.toLowerCase() === 'superadmin';
     
     // Subscription status for tenants
@@ -189,27 +200,36 @@ export const Dashboard: React.FC<{ selectedRouter: RouterConfigWithId | null }> 
         // Only show for tenant users, not superadmin
         if (isSuperadmin) return;
         
+        console.log('[Dashboard] Checking subscription for user:', user);
+        
         // Try to get subscription info from user object
         const subscriptionEndsAt = user?.subscriptionEndsAt;
         
-        console.log('[Dashboard] User subscription info:', { user, subscriptionEndsAt });
-        
-        if (subscriptionEndsAt) {
-            const now = new Date();
-            const endsAt = new Date(subscriptionEndsAt);
-            const diffMs = endsAt.getTime() - now.getTime();
-            const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
-            
-            console.log('[Dashboard] Subscription days left:', diffDays);
-            
+        if (!subscriptionEndsAt) {
+            console.log('[Dashboard] No subscriptionEndsAt found. User data:', JSON.stringify(user, null, 2));
+            // Set to show "No Active Subscription" state
             setSubscriptionInfo({
-                endsAt: subscriptionEndsAt,
-                daysLeft: diffDays,
-                isExpired: diffDays < 0
+                endsAt: null,
+                daysLeft: -999, // Special value to indicate no subscription
+                isExpired: false
             });
-        } else {
-            console.log('[Dashboard] No subscription info found in user object');
+            return;
         }
+        
+        console.log('[Dashboard] Found subscriptionEndsAt:', subscriptionEndsAt);
+        
+        const now = new Date();
+        const endsAt = new Date(subscriptionEndsAt);
+        const diffMs = endsAt.getTime() - now.getTime();
+        const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+        
+        console.log('[Dashboard] Subscription days left:', diffDays);
+        
+        setSubscriptionInfo({
+            endsAt: subscriptionEndsAt,
+            daysLeft: diffDays,
+            isExpired: diffDays < 0
+        });
     }, [isSuperadmin, user]);
 
     // 1. Fetch Host Status (Separate Interval) - Only for Superadmin
@@ -552,59 +572,77 @@ export const Dashboard: React.FC<{ selectedRouter: RouterConfigWithId | null }> 
                 {/* Subscription Status Card - Only for Tenants */}
                 {!isSuperadmin && subscriptionInfo && (
                     <StatCard title="Subscription Status">
-                        <div className="flex items-center gap-4">
-                            <div className={`flex-shrink-0 w-16 h-16 rounded-full flex items-center justify-center ${
-                                subscriptionInfo.isExpired 
-                                    ? 'bg-red-100 dark:bg-red-900/30' 
-                                    : subscriptionInfo.daysLeft <= 7 
-                                        ? 'bg-orange-100 dark:bg-orange-900/30'
-                                        : subscriptionInfo.daysLeft <= 30
-                                            ? 'bg-yellow-100 dark:bg-yellow-900/30'
-                                            : 'bg-emerald-100 dark:bg-emerald-900/30'
-                            }`}>
-                                <svg className={`w-8 h-8 ${
-                                    subscriptionInfo.isExpired 
-                                        ? 'text-red-600 dark:text-red-400'
-                                        : subscriptionInfo.daysLeft <= 7 
-                                            ? 'text-orange-600 dark:text-orange-400'
-                                            : subscriptionInfo.daysLeft <= 30
-                                                ? 'text-yellow-600 dark:text-yellow-400'
-                                                : 'text-emerald-600 dark:text-emerald-400'
-                                }`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                </svg>
+                        {subscriptionInfo.daysLeft === -999 ? (
+                            // No subscription set
+                            <div className="flex items-center gap-4">
+                                <div className="flex-shrink-0 w-16 h-16 rounded-full flex items-center justify-center bg-slate-100 dark:bg-slate-700">
+                                    <svg className="w-8 h-8 text-slate-500 dark:text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                                    </svg>
+                                </div>
+                                <div className="flex-1">
+                                    <p className="text-2xl font-bold text-slate-600 dark:text-slate-400">No Active Subscription</p>
+                                    <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                                        Please contact your administrator to activate your subscription
+                                    </p>
+                                </div>
                             </div>
-                            <div className="flex-1">
-                                {subscriptionInfo.isExpired ? (
-                                    <div>
-                                        <p className="text-2xl font-bold text-red-600 dark:text-red-400">Expired</p>
-                                        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                                            Expired on {new Date(subscriptionInfo.endsAt || '').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
-                                        </p>
-                                    </div>
-                                ) : subscriptionInfo.daysLeft === 0 ? (
-                                    <div>
-                                        <p className="text-2xl font-bold text-red-600 dark:text-red-400">Expires Today</p>
-                                        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Renew now to avoid service interruption</p>
-                                    </div>
-                                ) : (
-                                    <div>
-                                        <p className={`text-3xl font-bold ${
-                                            subscriptionInfo.daysLeft <= 7 
+                        ) : (
+                            // Has subscription
+                            <div className="flex items-center gap-4">
+                                <div className={`flex-shrink-0 w-16 h-16 rounded-full flex items-center justify-center ${
+                                    subscriptionInfo.isExpired 
+                                        ? 'bg-red-100 dark:bg-red-900/30' 
+                                        : subscriptionInfo.daysLeft <= 7 
+                                            ? 'bg-orange-100 dark:bg-orange-900/30'
+                                            : subscriptionInfo.daysLeft <= 30
+                                                ? 'bg-yellow-100 dark:bg-yellow-900/30'
+                                                : 'bg-emerald-100 dark:bg-emerald-900/30'
+                                }`}>
+                                    <svg className={`w-8 h-8 ${
+                                        subscriptionInfo.isExpired 
+                                            ? 'text-red-600 dark:text-red-400'
+                                            : subscriptionInfo.daysLeft <= 7 
                                                 ? 'text-orange-600 dark:text-orange-400'
                                                 : subscriptionInfo.daysLeft <= 30
                                                     ? 'text-yellow-600 dark:text-yellow-400'
                                                     : 'text-emerald-600 dark:text-emerald-400'
-                                        }`}>
-                                            {subscriptionInfo.daysLeft} Days Left
-                                        </p>
-                                        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                                            Expires on {new Date(subscriptionInfo.endsAt || '').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
-                                        </p>
-                                    </div>
-                                )}
+                                    }`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                    </svg>
+                                </div>
+                                <div className="flex-1">
+                                    {subscriptionInfo.isExpired ? (
+                                        <div>
+                                            <p className="text-2xl font-bold text-red-600 dark:text-red-400">Expired</p>
+                                            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                                                Expired on {new Date(subscriptionInfo.endsAt || '').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+                                            </p>
+                                        </div>
+                                    ) : subscriptionInfo.daysLeft === 0 ? (
+                                        <div>
+                                            <p className="text-2xl font-bold text-red-600 dark:text-red-400">Expires Today</p>
+                                            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Renew now to avoid service interruption</p>
+                                        </div>
+                                    ) : (
+                                        <div>
+                                            <p className={`text-3xl font-bold ${
+                                                subscriptionInfo.daysLeft <= 7 
+                                                    ? 'text-orange-600 dark:text-orange-400'
+                                                    : subscriptionInfo.daysLeft <= 30
+                                                        ? 'text-yellow-600 dark:text-yellow-400'
+                                                        : 'text-emerald-600 dark:text-emerald-400'
+                                            }`}>
+                                                {subscriptionInfo.daysLeft} Days Left
+                                            </p>
+                                            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                                                Expires on {new Date(subscriptionInfo.endsAt || '').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+                                            </p>
+                                        </div>
+                                    )}
+                                </div>
                             </div>
-                        </div>
+                        )}
                     </StatCard>
                 )}
                 
