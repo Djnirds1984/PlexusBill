@@ -2794,7 +2794,9 @@ async function startServer() {
 
     dbRouter.get('/company-settings', async (req, res) => {
         try {
-            const s = await db.get('SELECT companyName, address, contactNumber, email, logoBase64, companySettings FROM settings WHERE id = 1');
+            // Use tenant database for tenant isolation
+            const targetDb = req.tenantDb || db;
+            const s = await targetDb.get('SELECT companyName, address, contactNumber, email, logoBase64, companySettings FROM settings WHERE id = 1');
             if (s && s.companySettings) {
                 try {
                     const companySettings = JSON.parse(s.companySettings);
@@ -2813,11 +2815,14 @@ async function startServer() {
 
     dbRouter.post('/company-settings', async (req, res) => {
         try {
+            // Use tenant database for tenant isolation
+            const targetDb = req.tenantDb || db;
+            
             // Extract GCash fields and store them in companySettings JSON
             const { gcashNumber, gcashAccountName, ...directFields } = req.body;
             
             // Get existing companySettings
-            const existing = await db.get('SELECT companySettings FROM settings WHERE id = 1');
+            const existing = await targetDb.get('SELECT companySettings FROM settings WHERE id = 1');
             let companySettings = {};
             if (existing && existing.companySettings) {
                 try {
@@ -2838,7 +2843,7 @@ async function startServer() {
             const finalSetClause = setClause ? `${setClause}, companySettings = ?` : 'companySettings = ?';
             const finalValues = setClause ? [...values, JSON.stringify(companySettings)] : [JSON.stringify(companySettings)];
             
-            await db.run(`UPDATE settings SET ${finalSetClause} WHERE id = 1`, finalValues);
+            await targetDb.run(`UPDATE settings SET ${finalSetClause} WHERE id = 1`, finalValues);
             res.json({ message: 'Company settings saved' });
         } catch (e) {
             res.status(500).json({ message: e.message });

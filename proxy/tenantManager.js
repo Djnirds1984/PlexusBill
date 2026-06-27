@@ -112,9 +112,19 @@ async function initializeTenantSchema(db) {
             dbPassword TEXT,
             dbName TEXT,
             notificationSettings TEXT,
-            landingPageConfig TEXT
+            landingPageConfig TEXT,
+            companySettings TEXT,
+            facebookSettings TEXT,
+            billingSettings TEXT,
+            storeSettings TEXT
         );
         INSERT OR IGNORE INTO settings (id) VALUES (1);
+        
+        -- Ensure companySettings column exists (for existing tenant databases)
+        ALTER TABLE settings ADD COLUMN companySettings TEXT;
+        ALTER TABLE settings ADD COLUMN facebookSettings TEXT;
+        ALTER TABLE settings ADD COLUMN billingSettings TEXT;
+        ALTER TABLE settings ADD COLUMN storeSettings TEXT;
         
         CREATE TABLE IF NOT EXISTS roles (
             id TEXT PRIMARY KEY,
