@@ -110,7 +110,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, setCurrentView, c
     { id: 'repair_tickets', label: t('sidebar.repair_tickets') || 'Repair Tickets', icon: <CogIcon className="w-6 h-6" /> },
     { id: 'manual_payments', label: 'Manual Payments', icon: <CurrencyDollarIcon className="w-6 h-6" /> },
     { id: 'store_settings', label: 'Store Settings', icon: <ShoppingCartIcon className="w-6 h-6" /> },
-    { id: 'updater', label: t('sidebar.updater'), icon: <UpdateIcon className="w-6 h-6" /> },
     { id: 'logs', label: t('sidebar.logs'), icon: <CodeBracketIcon className="w-6 h-6" /> },
     { id: 'license', label: t('sidebar.license'), icon: <KeyIcon className="w-6 h-6" /> },
     { id: 'super_admin', label: t('sidebar.super_admin'), icon: <LockClosedIcon className="w-6 h-6" /> },
