@@ -120,9 +120,14 @@ async function initializeTenantSchema(db) {
         );
         INSERT OR IGNORE INTO settings (id) VALUES (1);
         
-        -- Ensure companySettings column exists (for existing tenant databases)
-        ALTER TABLE settings ADD COLUMN companySettings TEXT;
+        -- Ensure all settings columns exist (for existing tenant databases)
+        ALTER TABLE settings ADD COLUMN telegramSettings TEXT;
+        ALTER TABLE settings ADD COLUMN paymongoSettings TEXT;
+        ALTER TABLE settings ADD COLUMN xenditSettings TEXT;
         ALTER TABLE settings ADD COLUMN facebookSettings TEXT;
+        ALTER TABLE settings ADD COLUMN notificationSettings TEXT;
+        ALTER TABLE settings ADD COLUMN landingPageConfig TEXT;
+        ALTER TABLE settings ADD COLUMN companySettings TEXT;
         ALTER TABLE settings ADD COLUMN billingSettings TEXT;
         ALTER TABLE settings ADD COLUMN storeSettings TEXT;
         

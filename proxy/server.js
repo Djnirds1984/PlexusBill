@@ -2777,7 +2777,9 @@ async function startServer() {
     // Special handling for settings
     dbRouter.get('/panel-settings', async (req, res) => {
         try {
-            const s = await db.get('SELECT * FROM settings WHERE id = 1');
+            // Use tenant database for tenant isolation
+            const targetDb = req.tenantDb || db;
+            const s = await targetDb.get('SELECT * FROM settings WHERE id = 1');
             if(s) {
                 try { s.telegramSettings = JSON.parse(s.telegramSettings); } catch(e) {}
                 try { s.paymongoSettings = JSON.parse(s.paymongoSettings); } catch(e) {}
@@ -2924,6 +2926,9 @@ async function startServer() {
 
     dbRouter.post('/panel-settings', async (req, res) => {
         try {
+            // Use tenant database for tenant isolation
+            const targetDb = req.tenantDb || db;
+            
             const data = { ...req.body };
             if (data.telegramSettings) data.telegramSettings = JSON.stringify(data.telegramSettings);
             if (data.paymongoSettings) data.paymongoSettings = JSON.stringify(data.paymongoSettings);
@@ -2935,7 +2940,7 @@ async function startServer() {
             const keys = Object.keys(data);
             const values = Object.values(data);
             const setClause = keys.map(k => `${k} = ?`).join(',');
-            await db.run(`UPDATE settings SET ${setClause} WHERE id = 1`, values);
+            await targetDb.run(`UPDATE settings SET ${setClause} WHERE id = 1`, values);
             res.json({ message: 'Settings saved' });
         } catch (e) {
             res.status(500).json({ message: e.message });
