@@ -65,17 +65,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             if (response.ok) {
                 const userData = await response.json();
                 setUser(userData);
+                
+                // Save user data to localStorage (includes subscription info for tenants)
+                if (userData) {
+                    localStorage.setItem('user', JSON.stringify(userData));
+                }
             } else {
                 // Token is invalid, clear it
                 setUser(null);
                 setToken(null);
                 localStorage.removeItem('authToken');
+                localStorage.removeItem('user');
             }
         } catch (e) {
             console.error('Token verification failed', e);
             setUser(null);
             setToken(null);
             localStorage.removeItem('authToken');
+            localStorage.removeItem('user');
         }
     }, []);
 
@@ -110,6 +117,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setToken(newToken);
             setUser(newUser);
             localStorage.setItem('authToken', newToken);
+            
+            // Save user data to localStorage (includes subscription info for tenants)
+            if (newUser) {
+                localStorage.setItem('user', JSON.stringify(newUser));
+            }
+            
             await checkHasUsers(); // Re-check after registration
         } catch (e) {
             setError((e as Error).message);
@@ -117,6 +130,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setUser(null);
             setToken(null);
             localStorage.removeItem('authToken');
+            localStorage.removeItem('user');
         } finally {
             setIsLoading(false);
         }
@@ -177,6 +191,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setUser(null);
             setToken(null);
             localStorage.removeItem('authToken');
+            localStorage.removeItem('user');
             // Use replace to prevent going back to protected routes
             window.location.replace('/');
         }

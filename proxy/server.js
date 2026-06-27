@@ -1364,6 +1364,13 @@ async function startServer() {
             const subscriptionEndsAt = tenant.subscription_ends_at ? new Date(tenant.subscription_ends_at) : null;
             const isSubscriptionExpired = subscriptionEndsAt && now > subscriptionEndsAt;
             
+            console.log(`[Tenant Login] Tenant subscription info for ${tenantSlug}:`, {
+                subscription_ends_at: tenant.subscription_ends_at,
+                subscription_tier: tenant.subscription_tier,
+                calculatedEndsAt: subscriptionEndsAt,
+                isExpired: isSubscriptionExpired
+            });
+            
             res.json({
                 token,
                 user: {
@@ -1503,6 +1510,12 @@ async function startServer() {
                     updated_at = datetime('now')
                 WHERE id = ?
             `, subscriptionPeriod, subscriptionEndsAt.toISOString(), tenantId);
+            
+            console.log(`[Subscription Update] Updated tenant ${tenantId} (${tenant.slug}):`, {
+                subscriptionPeriod,
+                subscriptionEndsAt: subscriptionEndsAt.toISOString(),
+                previousEndsAt: tenant.subscription_ends_at
+            });
             
             // Log activity
             await superadminDb.run(`
