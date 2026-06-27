@@ -1356,7 +1356,9 @@ async function startServer() {
                 role: { id: user.role_id, name: user.role_name },
                 permissions: permList,
                 tenantId: tenant.id,
-                tenantSlug: tenant.slug
+                tenantSlug: tenant.slug,
+                subscriptionEndsAt: tenant.subscription_ends_at,
+                isSubscriptionExpired: !!isSubscriptionExpired
             }, SECRET_KEY, { expiresIn: '24h' });
             
             // Check subscription expiry
