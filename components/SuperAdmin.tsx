@@ -463,6 +463,47 @@ const TenantApprovalManager: React.FC = () => {
         return new Date(dateStr).toLocaleString();
     };
 
+    const getSubscriptionBadge = (subscriptionEndsAt: string) => {
+        if (!subscriptionEndsAt) return null;
+        
+        const now = new Date();
+        const endsAt = new Date(subscriptionEndsAt);
+        const diffMs = endsAt.getTime() - now.getTime();
+        const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+        
+        if (diffDays < 0) {
+            return (
+                <span className="inline-block px-2 py-1 text-xs font-medium rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" title={`Expired on ${formatDate(subscriptionEndsAt)}`}>
+                    Expired
+                </span>
+            );
+        } else if (diffDays === 0) {
+            return (
+                <span className="inline-block px-2 py-1 text-xs font-medium rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" title="Expires today">
+                    Expires today
+                </span>
+            );
+        } else if (diffDays <= 7) {
+            return (
+                <span className="inline-block px-2 py-1 text-xs font-medium rounded-full bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400" title={`Expires on ${formatDate(subscriptionEndsAt)}`}>
+                    {diffDays}d left
+                </span>
+            );
+        } else if (diffDays <= 30) {
+            return (
+                <span className="inline-block px-2 py-1 text-xs font-medium rounded-full bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400" title={`Expires on ${formatDate(subscriptionEndsAt)}`}>
+                    {diffDays}d left
+                </span>
+            );
+        } else {
+            return (
+                <span className="inline-block px-2 py-1 text-xs font-medium rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400" title={`Expires on ${formatDate(subscriptionEndsAt)}`}>
+                    {diffDays}d
+                </span>
+            );
+        }
+    };
+
     const getStatusBadge = (status: string) => {
         const colors: Record<string, string> = {
             'pending': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400',
@@ -544,6 +585,7 @@ const TenantApprovalManager: React.FC = () => {
                                                 <span className={`inline-block px-2 py-1 text-xs font-medium rounded-full ${getStatusBadge(tenant.approval_status)}`}>
                                                     {tenant.approval_status}
                                                 </span>
+                                                {tenant.approval_status === 'approved' && getSubscriptionBadge(tenant.subscription_ends_at)}
                                                 {tenant.approved_by && (
                                                     <div className="text-xs text-slate-500 dark:text-slate-400">
                                                         by {tenant.approved_by}
@@ -603,7 +645,7 @@ const TenantApprovalManager: React.FC = () => {
             )}
 
             {/* Statistics */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                 <div className="glass-card">
                     <div className="text-sm text-slate-500 dark:text-slate-400">Pending Approval</div>
                     <div className="text-3xl font-bold text-yellow-600 dark:text-yellow-400 mt-2">
@@ -620,6 +662,16 @@ const TenantApprovalManager: React.FC = () => {
                     <div className="text-sm text-slate-500 dark:text-slate-400">Rejected</div>
                     <div className="text-3xl font-bold text-red-600 dark:text-red-400 mt-2">
                         {tenants.filter(t => t.approval_status === 'rejected').length}
+                    </div>
+                </div>
+                <div className="glass-card">
+                    <div className="text-sm text-slate-500 dark:text-slate-400">Expiring Soon (7d)</div>
+                    <div className="text-3xl font-bold text-orange-600 dark:text-orange-400 mt-2">
+                        {tenants.filter(t => {
+                            if (!t.subscription_ends_at || t.approval_status !== 'approved') return false;
+                            const days = Math.ceil((new Date(t.subscription_ends_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+                            return days >= 0 && days <= 7;
+                        }).length}
                     </div>
                 </div>
             </div>
