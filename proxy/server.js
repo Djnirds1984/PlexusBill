@@ -8398,10 +8398,14 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
         if (!username || !password) return res.status(400).json({ message: 'Username and password required' });
         if (!pppoeUsername) return res.status(400).json({ message: 'PPPoE username is required' });
         try {
+            // Use tenant database for tenant isolation
+            const targetDb = req.tenantDb || db;
+            const tenantSlug = req.user?.tenantSlug;
+            
             // First, try to fetch account number from customers table based on pppoeUsername and routerId
             let fetchedAccountNumber = null;
             if (routerId && pppoeUsername) {
-                const customer = await db.get(
+                const customer = await targetDb.get(
                     'SELECT accountNumber FROM customers WHERE routerId = ? AND username = ?',
                     [routerId, pppoeUsername]
                 );
@@ -8417,8 +8421,8 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
             const salt = crypto.randomBytes(16).toString('hex');
             const hash = crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
             const id = `u_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-            await db.run('INSERT INTO client_users (id, username, password_hash, salt, router_id, pppoe_username, account_number, created_at) VALUES (?,?,?,?,?,?,?,?)',
-                [id, username, hash, salt, routerId, pppoeUsername, acc, new Date().toISOString()]);
+            await targetDb.run('INSERT INTO client_users (id, username, password_hash, salt, router_id, pppoe_username, account_number, tenant_slug, created_at) VALUES (?,?,?,?,?,?,?,?,?)',
+                [id, username, hash, salt, routerId, pppoeUsername, acc, tenantSlug, new Date().toISOString()]);
             res.json({ message: 'User created', id, accountNumber: acc });
         } catch (e) {
             if (e.message.includes('UNIQUE constraint failed')) return res.status(409).json({ message: 'Username already exists' });
@@ -8429,7 +8433,9 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
     // Admin: List Client Users (Protected)
     clientPortalRouter.get('/users', protect, async (req, res) => {
         try {
-            const users = await db.all('SELECT id, username, router_id, pppoe_username, account_number, created_at FROM client_users ORDER BY created_at DESC');
+            // Use tenant database for tenant isolation
+            const targetDb = req.tenantDb || db;
+            const users = await targetDb.all('SELECT id, username, router_id, pppoe_username, account_number, tenant_slug, created_at FROM client_users ORDER BY created_at DESC');
             res.json(users);
         } catch (e) { res.status(500).json({ message: e.message }); }
     });
@@ -8437,6 +8443,9 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
     // Fetch account number for a PPPoE user (Protected)
     clientPortalRouter.get('/lookup-account', protect, async (req, res) => {
         try {
+            // Use tenant database for tenant isolation
+            const targetDb = req.tenantDb || db;
+            
             const { routerId, pppoeUsername } = req.query;
             if (!routerId || !pppoeUsername) {
                 return res.status(400).json({ message: 'routerId and pppoeUsername are required' });
@@ -8444,7 +8453,7 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
             
             console.log(`[Client Portal Lookup] Searching for routerId=${routerId}, pppoeUsername=${pppoeUsername}`);
             
-            const customer = await db.get(
+            const customer = await targetDb.get(
                 'SELECT accountNumber FROM customers WHERE routerId = ? AND username = ?',
                 [routerId, pppoeUsername]
             );
@@ -8465,7 +8474,9 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
     // Admin: Delete Client User (Protected)
     clientPortalRouter.delete('/users/:id', protect, async (req, res) => {
         try {
-            await db.run('DELETE FROM client_users WHERE id = ?', [req.params.id]);
+            // Use tenant database for tenant isolation
+            const targetDb = req.tenantDb || db;
+            await targetDb.run('DELETE FROM client_users WHERE id = ?', [req.params.id]);
             res.json({ message: 'Deleted' });
         } catch (e) { res.status(500).json({ message: e.message }); }
     });
@@ -8473,11 +8484,14 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
     // Check if a client portal account exists for a PPPoE user (Protected)
     clientPortalRouter.get('/check-account', protect, async (req, res) => {
         try {
+            // Use tenant database for tenant isolation
+            const targetDb = req.tenantDb || db;
+            
             const { routerId, pppoeUsername } = req.query;
             if (!routerId || !pppoeUsername) {
                 return res.status(400).json({ message: 'routerId and pppoeUsername are required' });
             }
-            const user = await db.get(
+            const user = await targetDb.get(
                 'SELECT id, username FROM client_users WHERE router_id = ? AND pppoe_username = ?',
                 [routerId, pppoeUsername]
             );
@@ -8494,8 +8508,12 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
         if (!pppoeUsername) return res.status(400).json({ message: 'PPPoE username is required' });
         if (!routerId) return res.status(400).json({ message: 'Router ID is required' });
         try {
+            // Use tenant database for tenant isolation
+            const targetDb = req.tenantDb || db;
+            const tenantSlug = req.user?.tenantSlug;
+            
             // Check if account already exists for this PPPoE user + router
-            const existing = await db.get(
+            const existing = await targetDb.get(
                 'SELECT * FROM client_users WHERE router_id = ? AND pppoe_username = ?',
                 [routerId, pppoeUsername]
             );
@@ -8505,14 +8523,14 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
                 if (password) {
                     const salt = crypto.randomBytes(16).toString('hex');
                     const hash = crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
-                    await db.run(
+                    await targetDb.run(
                         'UPDATE client_users SET password_hash = ?, salt = ? WHERE id = ?',
                         [hash, salt, existing.id]
                     );
                 }
                 // Update account number if provided and different
                 if (accountNumber && accountNumber !== existing.account_number) {
-                    await db.run(
+                    await targetDb.run(
                         'UPDATE client_users SET account_number = ? WHERE id = ?',
                         [accountNumber, existing.id]
                     );
@@ -8525,9 +8543,9 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
                 const hash = crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
                 const id = `u_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
                 const acc = accountNumber || await generateAccountNumber();
-                await db.run(
-                    'INSERT INTO client_users (id, username, password_hash, salt, router_id, pppoe_username, account_number, created_at) VALUES (?,?,?,?,?,?,?,?)',
-                    [id, pppoeUsername, hash, salt, routerId, pppoeUsername, acc, new Date().toISOString()]
+                await targetDb.run(
+                    'INSERT INTO client_users (id, username, password_hash, salt, router_id, pppoe_username, account_number, tenant_slug, created_at) VALUES (?,?,?,?,?,?,?,?,?)',
+                    [id, pppoeUsername, hash, salt, routerId, pppoeUsername, acc, tenantSlug, new Date().toISOString()]
                 );
                 res.json({ message: 'Portal account created', id, created: true, accountNumber: acc });
             }
@@ -8542,41 +8560,166 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
 
     app.use('/api/client-portal', clientPortalRouter);
 
-    // Public Client Login
+    // Public Client Login - Search all tenant databases
     app.post('/api/public/client-portal/login', async (req, res) => {
         const { username, password } = req.body;
         if (!username || !password) return res.status(400).json({ message: 'Credentials required' });
+        
         try {
-            const user = await db.get('SELECT * FROM client_users WHERE username = ?', [username]);
-            if (!user) return res.status(401).json({ message: 'Invalid credentials' });
+            console.log(`[Client Portal Login] Searching for user: ${username}`);
             
-            const hash = crypto.pbkdf2Sync(password, user.salt, 1000, 64, 'sha512').toString('hex');
-            if (hash !== user.password_hash) return res.status(401).json({ message: 'Invalid credentials' });
+            // Get all active tenant databases
+            const tenants = await superadminDb.all(
+                `SELECT database_path, slug, status, approval_status 
+                 FROM tenants 
+                 WHERE status = 'active' AND approval_status = 'approved'`
+            );
             
-            let acc = user.account_number;
+            console.log(`[Client Portal Login] Found ${tenants.length} active tenants to search`);
+            
+            // Search each tenant database for the user
+            let foundUser = null;
+            let foundTenantDb = null;
+            let foundTenantSlug = null;
+            
+            for (const tenant of tenants) {
+                try {
+                    // Open tenant database
+                    const sqlite3 = require('sqlite3').verbose();
+                    const tenantDb = new sqlite3.Database(tenant.database_path);
+                    
+                    // Search for user in this tenant's database
+                    const user = await new Promise((resolve, reject) => {
+                        tenantDb.get(
+                            'SELECT * FROM client_users WHERE username = ?',
+                            [username],
+                            (err, row) => {
+                                if (err) reject(err);
+                                else resolve(row);
+                            }
+                        );
+                    });
+                    
+                    if (user) {
+                        console.log(`[Client Portal Login] ✓ Found user "${username}" in tenant: ${tenant.slug}`);
+                        foundUser = user;
+                        foundTenantDb = tenantDb;
+                        foundTenantSlug = tenant.slug;
+                        break; // Stop searching once found
+                    }
+                    
+                    // Close database if user not found
+                    await new Promise((resolve) => tenantDb.close(resolve));
+                } catch (err) {
+                    console.error(`[Client Portal Login] Error checking tenant ${tenant.slug}:`, err.message);
+                }
+            }
+            
+            if (!foundUser) {
+                console.log(`[Client Portal Login] ✗ User "${username}" not found in any tenant database`);
+                return res.status(401).json({ message: 'Invalid credentials' });
+            }
+            
+            // Verify password
+            const hash = crypto.pbkdf2Sync(password, foundUser.salt, 1000, 64, 'sha512').toString('hex');
+            if (hash !== foundUser.password_hash) {
+                console.log(`[Client Portal Login] ✗ Invalid password for user: ${username}`);
+                return res.status(401).json({ message: 'Invalid credentials' });
+            }
+            
+            console.log(`[Client Portal Login] ✓ Successful login for "${username}" in tenant: ${foundTenantSlug}`);
+            
+            // Ensure account number exists
+            let acc = foundUser.account_number;
             if (!acc || String(acc).trim() === '') {
-                const cust = await db.get('SELECT accountNumber FROM customers WHERE routerId = ? AND username = ?', [user.router_id, user.pppoe_username || user.username]);
+                const cust = await new Promise((resolve, reject) => {
+                    foundTenantDb.get(
+                        'SELECT accountNumber FROM customers WHERE routerId = ? AND username = ?',
+                        [foundUser.router_id, foundUser.pppoe_username || foundUser.username],
+                        (err, row) => {
+                            if (err) reject(err);
+                            else resolve(row);
+                        }
+                    );
+                });
                 acc = cust?.accountNumber || '';
                 if (!acc) {
                     acc = await generateAccountNumber();
                 }
-                await db.run('UPDATE client_users SET account_number = ? WHERE id = ?', [acc, user.id]);
+                await new Promise((resolve, reject) => {
+                    foundTenantDb.run(
+                        'UPDATE client_users SET account_number = ? WHERE id = ?',
+                        [acc, foundUser.id],
+                        (err) => {
+                            if (err) reject(err);
+                            else resolve();
+                        }
+                    );
+                });
                 if (cust && (!cust.accountNumber || String(cust.accountNumber).trim() === '')) {
-                    await db.run('UPDATE customers SET accountNumber = ? WHERE routerId = ? AND username = ?', [acc, user.router_id, user.pppoe_username || user.username]);
+                    await new Promise((resolve, reject) => {
+                        foundTenantDb.run(
+                            'UPDATE customers SET accountNumber = ? WHERE routerId = ? AND username = ?',
+                            [acc, foundUser.router_id, foundUser.pppoe_username || foundUser.username],
+                            (err) => {
+                                if (err) reject(err);
+                                else resolve();
+                            }
+                        );
+                    });
                     
                     // Sync to Supabase
-                    const updatedCustomer = await db.get('SELECT * FROM customers WHERE routerId = ? AND username = ?', [user.router_id, user.pppoe_username || user.username]);
+                    const updatedCustomer = await new Promise((resolve, reject) => {
+                        foundTenantDb.get(
+                            'SELECT * FROM customers WHERE routerId = ? AND username = ?',
+                            [foundUser.router_id, foundUser.pppoe_username || foundUser.username],
+                            (err, row) => {
+                                if (err) reject(err);
+                                else resolve(row);
+                            }
+                        );
+                    });
                     await syncCustomerToSupabase(updatedCustomer);
                 }
             }
+            
+            // Load tenant-specific settings (company name, logo, payment info)
+            let companySettings = {};
+            try {
+                const settings = await new Promise((resolve, reject) => {
+                    foundTenantDb.get(
+                        'SELECT companySettings FROM settings WHERE id = 1',
+                        (err, row) => {
+                            if (err) reject(err);
+                            else resolve(row);
+                        }
+                    );
+                });
+                
+                if (settings && settings.companySettings) {
+                    companySettings = JSON.parse(settings.companySettings);
+                }
+            } catch (err) {
+                console.error('[Client Portal Login] Error loading company settings:', err.message);
+            }
+            
+            // Close tenant database connection
+            await new Promise((resolve) => foundTenantDb.close(resolve));
+            
+            // Return customer data with tenant context
             res.json({
-                id: user.id,
-                username: user.username,
-                routerId: user.router_id,
-                pppoeUsername: user.pppoe_username,
-                accountNumber: acc
+                id: foundUser.id,
+                username: foundUser.username,
+                routerId: foundUser.router_id,
+                pppoeUsername: foundUser.pppoe_username,
+                accountNumber: acc,
+                tenantSlug: foundTenantSlug,  // ← Frontend now knows which tenant!
+                companySettings: companySettings  // ← Company branding for this tenant
             });
-        } catch (e) { res.status(500).json({ message: e.message }); }
+        } catch (e) { 
+            console.error('[Client Portal Login] Error:', e.message);
+            res.status(500).json({ message: e.message }); 
+        }
     });
 
 

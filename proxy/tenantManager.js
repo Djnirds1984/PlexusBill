@@ -255,13 +255,20 @@ async function initializeTenantSchema(db) {
         );
         CREATE TABLE IF NOT EXISTS client_users (
             id TEXT PRIMARY KEY,
-            username TEXT NOT NULL UNIQUE,
+            username TEXT NOT NULL,
             password_hash TEXT NOT NULL,
             salt TEXT NOT NULL,
             router_id TEXT,
             pppoe_username TEXT,
-            created_at TEXT
+            account_number TEXT,
+            tenant_slug TEXT,
+            created_at TEXT,
+            UNIQUE(username, tenant_slug)
         );
+        
+        -- Ensure tenant_slug and account_number columns exist (for existing tenant databases)
+        ALTER TABLE client_users ADD COLUMN tenant_slug TEXT;
+        ALTER TABLE client_users ADD COLUMN account_number TEXT;
         CREATE TABLE IF NOT EXISTS applications (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
