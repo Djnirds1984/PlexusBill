@@ -1428,6 +1428,71 @@ async function startServer() {
         }
     });
 
+    // PATCH /api/superadmin/tenants/:tenantId/subscription - Update tenant subscription
+    app.patch('/api/superadmin/tenants/:tenantId/subscription', async (req, res) => {
+        const { tenantId } = req.params;
+        const { subscriptionPeriod } = req.body;
+        
+        try {
+            const tenant = await superadminDb.get('SELECT * FROM tenants WHERE id = ?', tenantId);
+            if (!tenant) {
+                return res.status(404).json({ error: 'Tenant not found' });
+            }
+            
+            if (tenant.approval_status !== 'approved') {
+                return res.status(400).json({ error: 'Tenant must be approved before updating subscription' });
+            }
+            
+            // Calculate subscription end date based on period
+            const subscriptionEndsAt = new Date();
+            switch (subscriptionPeriod) {
+                case 'trial-3days':
+                    subscriptionEndsAt.setDate(subscriptionEndsAt.getDate() + 3);
+                    break;
+                case '1-month':
+                    subscriptionEndsAt.setMonth(subscriptionEndsAt.getMonth() + 1);
+                    break;
+                case '3-months':
+                    subscriptionEndsAt.setMonth(subscriptionEndsAt.getMonth() + 3);
+                    break;
+                case '6-months':
+                    subscriptionEndsAt.setMonth(subscriptionEndsAt.getMonth() + 6);
+                    break;
+                case '1-year':
+                    subscriptionEndsAt.setFullYear(subscriptionEndsAt.getFullYear() + 1);
+                    break;
+                default:
+                    subscriptionEndsAt.setDate(subscriptionEndsAt.getDate() + 3); // Default to 3 days
+            }
+            
+            await superadminDb.run(`
+                UPDATE tenants 
+                SET subscription_tier = ?,
+                    subscription_ends_at = ?,
+                    updated_at = datetime('now')
+                WHERE id = ?
+            `, subscriptionPeriod, subscriptionEndsAt.toISOString(), tenantId);
+            
+            // Log activity
+            await superadminDb.run(`
+                INSERT INTO tenant_activity_logs (id, tenant_id, action, details)
+                VALUES (?, ?, 'subscription_updated', ?)
+            `, `log_${Date.now()}`, tenantId, JSON.stringify({ 
+                subscriptionPeriod,
+                subscriptionEndsAt: subscriptionEndsAt.toISOString()
+            }));
+            
+            res.json({ 
+                success: true, 
+                message: 'Subscription updated successfully',
+                subscriptionEndsAt: subscriptionEndsAt.toISOString()
+            });
+        } catch (err) {
+            console.error('[Update Subscription Error]', err);
+            res.status(500).json({ error: 'Failed to update subscription' });
+        }
+    });
+
     // POST /api/superadmin/tenants/:tenantId/reject - Reject tenant
     app.post('/api/superadmin/tenants/:tenantId/reject', async (req, res) => {
         const { tenantId } = req.params;

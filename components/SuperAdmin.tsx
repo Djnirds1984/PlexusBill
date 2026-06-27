@@ -297,6 +297,7 @@ const TenantApprovalManager: React.FC = () => {
     const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
     const [selectedTenant, setSelectedTenant] = useState<{ id: string; name: string } | null>(null);
     const [subscriptionPeriod, setSubscriptionPeriod] = useState('trial-3days');
+    const [modalMode, setModalMode] = useState<'approve' | 'edit'>('approve');
 
     const fetchTenants = useCallback(async () => {
         setLoading(true);
@@ -320,6 +321,14 @@ const TenantApprovalManager: React.FC = () => {
     const handleApproveClick = (tenantId: string, tenantName: string) => {
         setSelectedTenant({ id: tenantId, name: tenantName });
         setSubscriptionPeriod('trial-3days');
+        setModalMode('approve');
+        setShowSubscriptionModal(true);
+    };
+
+    const handleEditSubscription = (tenantId: string, tenantName: string, currentTier: string) => {
+        setSelectedTenant({ id: tenantId, name: tenantName });
+        setSubscriptionPeriod(currentTier || 'trial-3days');
+        setModalMode('edit');
         setShowSubscriptionModal(true);
     };
 
@@ -342,6 +351,36 @@ const TenantApprovalManager: React.FC = () => {
             if (!res.ok) {
                 const error = await res.json();
                 throw new Error(error.error || 'Failed to approve tenant');
+            }
+            
+            // Refresh list
+            await fetchTenants();
+            setSelectedTenant(null);
+        } catch (err) {
+            setError((err as Error).message);
+        } finally {
+            setActionLoading(null);
+        }
+    };
+
+    const handleUpdateSubscription = async () => {
+        if (!selectedTenant) return;
+        
+        setActionLoading(selectedTenant.id);
+        setShowSubscriptionModal(false);
+        
+        try {
+            const res = await fetch(`/api/superadmin/tenants/${selectedTenant.id}/subscription`, {
+                method: 'PATCH',
+                headers: { ...getAuthHeader(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    subscriptionPeriod 
+                })
+            });
+            
+            if (!res.ok) {
+                const error = await res.json();
+                throw new Error(error.error || 'Failed to update subscription');
             }
             
             // Refresh list
@@ -535,6 +574,16 @@ const TenantApprovalManager: React.FC = () => {
                                                         </button>
                                                     </>
                                                 )}
+                                                {tenant.approval_status === 'approved' && (
+                                                    <button
+                                                        onClick={() => handleEditSubscription(tenant.id, tenant.name, tenant.subscription_tier)}
+                                                        disabled={actionLoading === tenant.id}
+                                                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-xl shadow-glass transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                                        title="Edit subscription period"
+                                                    >
+                                                        Edit Subscription
+                                                    </button>
+                                                )}
                                                 <button
                                                     onClick={() => handleDelete(tenant.id, tenant.name, tenant.slug)}
                                                     disabled={actionLoading === tenant.id}
@@ -581,10 +630,13 @@ const TenantApprovalManager: React.FC = () => {
             <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
                 <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6">
                     <h3 className="text-2xl font-bold text-slate-900 dark:text-white mb-2">
-                        Approve Tenant
+                        {modalMode === 'approve' ? 'Approve Tenant' : 'Edit Subscription'}
                     </h3>
                     <p className="text-slate-600 dark:text-slate-400 mb-6">
-                        Setting up subscription for <span className="font-semibold text-slate-900 dark:text-white">{selectedTenant.name}</span>
+                        {modalMode === 'approve' 
+                            ? `Setting up subscription for ` 
+                            : `Update subscription for `}
+                        <span className="font-semibold text-slate-900 dark:text-white">{selectedTenant.name}</span>
                     </p>
 
                     <div className="space-y-4 mb-6">
@@ -615,11 +667,15 @@ const TenantApprovalManager: React.FC = () => {
                             Cancel
                         </button>
                         <button
-                            onClick={handleApprove}
+                            onClick={modalMode === 'approve' ? handleApprove : handleUpdateSubscription}
                             disabled={actionLoading === selectedTenant.id}
                             className="flex-1 px-4 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white font-medium rounded-lg transition-colors"
                         >
-                            {actionLoading === selectedTenant.id ? 'Approving...' : 'Approve & Activate'}
+                            {actionLoading === selectedTenant.id 
+                                ? 'Processing...' 
+                                : modalMode === 'approve' 
+                                    ? 'Approve & Activate' 
+                                    : 'Update Subscription'}
                         </button>
                     </div>
                 </div>
