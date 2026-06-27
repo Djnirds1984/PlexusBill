@@ -84,6 +84,17 @@ let superadminDb;
 const tenantDbCache = new Map();
 
 async function getDb(tenantSlug = null) {
+    // Load SQLite modules if not already loaded
+    if (!sqlite3 || !open) {
+        try {
+            sqlite3 = require('sqlite3');
+            ({ open } = require('sqlite'));
+        } catch (e) {
+            console.error('[Backend] Failed to load SQLite modules:', e.message);
+            throw new Error('Database module unavailable');
+        }
+    }
+    
     // If tenant slug provided, use tenant database
     if (tenantSlug) {
         if (tenantDbCache.has(tenantSlug)) {
@@ -97,6 +108,11 @@ async function getDb(tenantSlug = null) {
             filename: tenantDbPath,
             driver: sqlite3.Database
         });
+        
+        // Enable WAL mode for tenant databases to prevent caching issues
+        await tenantDb.exec('PRAGMA journal_mode = WAL;');
+        await tenantDb.exec('PRAGMA synchronous = NORMAL;');
+        await tenantDb.exec('PRAGMA cache_size = -2000;');
         
         tenantDbCache.set(tenantSlug, tenantDb);
         return tenantDb;
