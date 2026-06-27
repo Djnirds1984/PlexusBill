@@ -144,6 +144,11 @@ export const Dashboard: React.FC<{ selectedRouter: RouterConfigWithId | null }> 
     const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
     const [pppoeCount, setPppoeCount] = useState<number>(0);
     
+    // Get user from localStorage to check role
+    const userStr = localStorage.getItem('user');
+    const user = userStr ? JSON.parse(userStr) : null;
+    const isSuperadmin = user?.role?.name?.toLowerCase() === 'superadmin';
+    
     // Interface Names List
     const [availableInterfaces, setAvailableInterfaces] = useState<string[]>([]);
     const [interfaceDetails, setInterfaceDetails] = useState<Interface[]>([]); // Full interface details for status
@@ -176,8 +181,10 @@ export const Dashboard: React.FC<{ selectedRouter: RouterConfigWithId | null }> 
 
     // --- DATA FETCHING ---
 
-    // 1. Fetch Host Status (Separate Interval)
+    // 1. Fetch Host Status (Separate Interval) - Only for Superadmin
     useEffect(() => {
+        if (!isSuperadmin) return; // Don't fetch for tenant users
+        
         const fetchHost = async () => {
             try {
                 const data = await getPanelHostStatus();
@@ -187,7 +194,7 @@ export const Dashboard: React.FC<{ selectedRouter: RouterConfigWithId | null }> 
         fetchHost();
         const interval = setInterval(fetchHost, 5000);
         return () => clearInterval(interval);
-    }, []);
+    }, [isSuperadmin]);
 
     // 2. Fetch Router System Info & Interfaces (Main Logic)
     const fetchRouterData = useCallback(async () => {
@@ -438,19 +445,21 @@ export const Dashboard: React.FC<{ selectedRouter: RouterConfigWithId | null }> 
     if (!selectedRouter) {
         return (
             <div className="space-y-8">
-                 <StatCard title="Panel Host Status">
-                     {!hostStatus ? <div className="flex items-center justify-center h-24"><Loader /></div> : (
-                     <>
-                        <StatItem label="CPU Usage" value={`${(hostStatus.cpuUsage || 0).toFixed(1)}%`}><ProgressBar percent={hostStatus.cpuUsage || 0} colorClass="bg-green-500" /></StatItem>
-                        <StatItem label="RAM Usage" value={`${(hostStatus.memory?.percent || 0).toFixed(1)}%`} subtext={`(${hostStatus.memory?.used}/${hostStatus.memory?.total})`}><ProgressBar percent={hostStatus.memory?.percent || 0} colorClass="bg-sky-500" /></StatItem>
-                        <StatItem label="Disk Usage" value={`${(hostStatus.disk?.percent || 0).toFixed(1)}%`} subtext={`(${hostStatus.disk?.used}/${hostStatus.disk?.total})`}><ProgressBar percent={hostStatus.disk?.percent || 0} colorClass="bg-amber-500" /></StatItem>
-                        <StatItem label="WAN IP" value={hostStatus.wanIp || '—'} />
-                        {hostStatus.localIps && hostStatus.localIps.length > 0 && hostStatus.localIps.map(({ iface, ip }) => (
-                            <StatItem key={iface} label={`Local IP (${iface})`} value={ip} />
-                        ))}
-                     </>
-                     )}
-                 </StatCard>
+                 {isSuperadmin && (
+                     <StatCard title="Panel Host Status">
+                         {!hostStatus ? <div className="flex items-center justify-center h-24"><Loader /></div> : (
+                         <>
+                            <StatItem label="CPU Usage" value={`${(hostStatus.cpuUsage || 0).toFixed(1)}%`}><ProgressBar percent={hostStatus.cpuUsage || 0} colorClass="bg-green-500" /></StatItem>
+                            <StatItem label="RAM Usage" value={`${(hostStatus.memory?.percent || 0).toFixed(1)}%`} subtext={`(${hostStatus.memory?.used}/${hostStatus.memory?.total})`}><ProgressBar percent={hostStatus.memory?.percent || 0} colorClass="bg-sky-500" /></StatItem>
+                            <StatItem label="Disk Usage" value={`${(hostStatus.disk?.percent || 0).toFixed(1)}%`} subtext={`(${hostStatus.disk?.used}/${hostStatus.disk?.total})`}><ProgressBar percent={hostStatus.disk?.percent || 0} colorClass="bg-amber-500" /></StatItem>
+                            <StatItem label="WAN IP" value={hostStatus.wanIp || '—'} />
+                            {hostStatus.localIps && hostStatus.localIps.length > 0 && hostStatus.localIps.map(({ iface, ip }) => (
+                                <StatItem key={iface} label={`Local IP (${iface})`} value={ip} />
+                            ))}
+                         </>
+                         )}
+                     </StatCard>
+                 )}
                  <div className="flex flex-col items-center justify-center h-64 text-center">
                     <RouterIcon className="w-24 h-24 text-slate-300 dark:text-slate-700 mb-4" />
                     <h2 className="text-2xl font-bold text-slate-800 dark:text-slate-200">No Router Selected</h2>
@@ -485,27 +494,29 @@ export const Dashboard: React.FC<{ selectedRouter: RouterConfigWithId | null }> 
     return (
         <div className="space-y-6">
             {/* TOP: STATUS CARDS */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <StatCard title="Panel Host Status">
-                    {!hostStatus ? <div className="flex items-center justify-center h-24"><Loader /></div> : (
-                    <>
-                        <StatItem label="CPU Usage" value={`${(hostStatus.cpuUsage || 0).toFixed(1)}%`}><ProgressBar percent={hostStatus.cpuUsage || 0} colorClass="bg-green-500" /></StatItem>
-                        <StatItem label="RAM Usage" value={`${(hostStatus.memory?.percent || 0).toFixed(1)}%`} subtext={`(${hostStatus.memory?.used}/${hostStatus.memory?.total})`}><ProgressBar percent={hostStatus.memory?.percent || 0} colorClass="bg-sky-500" /></StatItem>
-                        <StatItem label="Disk Usage" value={`${(hostStatus.disk?.percent || 0).toFixed(1)}%`} subtext={`(${hostStatus.disk?.used}/${hostStatus.disk?.total})`}><ProgressBar percent={hostStatus.disk?.percent || 0} colorClass="bg-amber-500" /></StatItem>
-                        {hostStatus.temperature !== undefined && hostStatus.temperature !== null && (
-                             <StatItem label="Temperature" value={`${hostStatus.temperature.toFixed(1)}°C`}><ProgressBar percent={hostStatus.temperature} colorClass="bg-orange-500" /></StatItem>
+            <div className={`grid gap-6 ${isSuperadmin ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}>
+                {isSuperadmin && (
+                    <StatCard title="Panel Host Status">
+                        {!hostStatus ? <div className="flex items-center justify-center h-24"><Loader /></div> : (
+                        <>
+                            <StatItem label="CPU Usage" value={`${(hostStatus.cpuUsage || 0).toFixed(1)}%`}><ProgressBar percent={hostStatus.cpuUsage || 0} colorClass="bg-green-500" /></StatItem>
+                            <StatItem label="RAM Usage" value={`${(hostStatus.memory?.percent || 0).toFixed(1)}%`} subtext={`(${hostStatus.memory?.used}/${hostStatus.memory?.total})`}><ProgressBar percent={hostStatus.memory?.percent || 0} colorClass="bg-sky-500" /></StatItem>
+                            <StatItem label="Disk Usage" value={`${(hostStatus.disk?.percent || 0).toFixed(1)}%`} subtext={`(${hostStatus.disk?.used}/${hostStatus.disk?.total})`}><ProgressBar percent={hostStatus.disk?.percent || 0} colorClass="bg-amber-500" /></StatItem>
+                            {hostStatus.temperature !== undefined && hostStatus.temperature !== null && (
+                                 <StatItem label="Temperature" value={`${hostStatus.temperature.toFixed(1)}°C`}><ProgressBar percent={hostStatus.temperature} colorClass="bg-orange-500" /></StatItem>
+                            )}
+                            <StatItem
+                                label="WAN IP"
+                                value={hostStatus.wanIp || '—'}
+                                icon={<SignalIcon className="w-4 h-4 text-slate-400" />}
+                            />
+                            {hostStatus.localIps && hostStatus.localIps.length > 0 && hostStatus.localIps.map(({ iface, ip }) => (
+                                <StatItem key={iface} label={`Local IP (${iface})`} value={ip} icon={<SignalIcon className="w-4 h-4 text-slate-400" />} />
+                            ))}
+                        </>
                         )}
-                        <StatItem
-                            label="WAN IP"
-                            value={hostStatus.wanIp || '—'}
-                            icon={<SignalIcon className="w-4 h-4 text-slate-400" />}
-                        />
-                        {hostStatus.localIps && hostStatus.localIps.length > 0 && hostStatus.localIps.map(({ iface, ip }) => (
-                            <StatItem key={iface} label={`Local IP (${iface})`} value={ip} icon={<SignalIcon className="w-4 h-4 text-slate-400" />} />
-                        ))}
-                    </>
-                    )}
-                </StatCard>
+                    </StatCard>
+                )}
                 <StatCard title={`Router Status: ${selectedRouter.name}`}>
                     {systemInfo ? (
                         <div className="grid grid-cols-2 gap-4">
