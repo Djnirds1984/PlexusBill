@@ -292,6 +292,11 @@ const TenantApprovalManager: React.FC = () => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [actionLoading, setActionLoading] = useState<string | null>(null);
+    
+    // Subscription modal state
+    const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
+    const [selectedTenant, setSelectedTenant] = useState<{ id: string; name: string } | null>(null);
+    const [subscriptionPeriod, setSubscriptionPeriod] = useState('trial-3days');
 
     const fetchTenants = useCallback(async () => {
         setLoading(true);
@@ -312,15 +317,26 @@ const TenantApprovalManager: React.FC = () => {
         fetchTenants();
     }, [fetchTenants]);
 
-    const handleApprove = async (tenantId: string, tenantName: string) => {
-        if (!confirm(`Approve tenant "${tenantName}"? They will be able to login.`)) return;
+    const handleApproveClick = (tenantId: string, tenantName: string) => {
+        setSelectedTenant({ id: tenantId, name: tenantName });
+        setSubscriptionPeriod('trial-3days');
+        setShowSubscriptionModal(true);
+    };
+
+    const handleApprove = async () => {
+        if (!selectedTenant) return;
         
-        setActionLoading(tenantId);
+        setActionLoading(selectedTenant.id);
+        setShowSubscriptionModal(false);
+        
         try {
-            const res = await fetch(`/api/superadmin/tenants/${tenantId}/approve`, {
+            const res = await fetch(`/api/superadmin/tenants/${selectedTenant.id}/approve`, {
                 method: 'POST',
                 headers: { ...getAuthHeader(), 'Content-Type': 'application/json' },
-                body: JSON.stringify({ approvedBy: 'superadmin' })
+                body: JSON.stringify({ 
+                    approvedBy: 'superadmin',
+                    subscriptionPeriod 
+                })
             });
             
             if (!res.ok) {
@@ -330,6 +346,7 @@ const TenantApprovalManager: React.FC = () => {
             
             // Refresh list
             await fetchTenants();
+            setSelectedTenant(null);
         } catch (err) {
             setError((err as Error).message);
         } finally {
@@ -428,6 +445,7 @@ const TenantApprovalManager: React.FC = () => {
     }
 
     return (
+        <>
         <div className="space-y-6">
             <div className="flex items-center justify-between">
                 <div>
@@ -502,7 +520,7 @@ const TenantApprovalManager: React.FC = () => {
                                                 {tenant.approval_status === 'pending' && (
                                                     <>
                                                         <button
-                                                            onClick={() => handleApprove(tenant.id, tenant.name)}
+                                                            onClick={() => handleApproveClick(tenant.id, tenant.name)}
                                                             disabled={actionLoading === tenant.id}
                                                             className="px-4 py-2 gradient-primary text-white text-sm font-medium rounded-xl shadow-glass hover:shadow-glass-lg transition-all hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
                                                         >
@@ -557,6 +575,57 @@ const TenantApprovalManager: React.FC = () => {
                 </div>
             </div>
         </div>
+        
+        {/* Subscription Modal */}
+        {showSubscriptionModal && selectedTenant && (
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+                <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6">
+                    <h3 className="text-2xl font-bold text-slate-900 dark:text-white mb-2">
+                        Approve Tenant
+                    </h3>
+                    <p className="text-slate-600 dark:text-slate-400 mb-6">
+                        Setting up subscription for <span className="font-semibold text-slate-900 dark:text-white">{selectedTenant.name}</span>
+                    </p>
+
+                    <div className="space-y-4 mb-6">
+                        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+                            Subscription Period
+                        </label>
+                        <select
+                            value={subscriptionPeriod}
+                            onChange={(e) => setSubscriptionPeriod(e.target.value)}
+                            className="w-full px-4 py-3 border border-slate-300 dark:border-slate-600 rounded-lg bg-white dark:bg-slate-700 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        >
+                            <option value="trial-3days">Trial - 3 Days</option>
+                            <option value="1-month">1 Month</option>
+                            <option value="3-months">3 Months</option>
+                            <option value="6-months">6 Months</option>
+                            <option value="1-year">1 Year</option>
+                        </select>
+                    </div>
+
+                    <div className="flex gap-3">
+                        <button
+                            onClick={() => {
+                                setShowSubscriptionModal(false);
+                                setSelectedTenant(null);
+                            }}
+                            className="flex-1 px-4 py-3 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 font-medium rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={handleApprove}
+                            disabled={actionLoading === selectedTenant.id}
+                            className="flex-1 px-4 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white font-medium rounded-lg transition-colors"
+                        >
+                            {actionLoading === selectedTenant.id ? 'Approving...' : 'Approve & Activate'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
+        </>
     );
 };
 
