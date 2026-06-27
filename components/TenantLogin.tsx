@@ -38,6 +38,11 @@ export const TenantLogin: React.FC = () => {
             // Store token with tenant context
             localStorage.setItem('authToken', data.token);
             localStorage.setItem('tenantSlug', tenantSlug || '');
+            
+            // Store user data including subscription info
+            if (data.user) {
+                localStorage.setItem('user', JSON.stringify(data.user));
+            }
 
             // Redirect to tenant dashboard
             window.location.href = `/tenant/${tenantSlug}/dashboard`;

@@ -189,17 +189,26 @@ export const Dashboard: React.FC<{ selectedRouter: RouterConfigWithId | null }> 
         // Only show for tenant users, not superadmin
         if (isSuperadmin) return;
         
-        if (user?.subscriptionEndsAt) {
+        // Try to get subscription info from user object
+        const subscriptionEndsAt = user?.subscriptionEndsAt;
+        
+        console.log('[Dashboard] User subscription info:', { user, subscriptionEndsAt });
+        
+        if (subscriptionEndsAt) {
             const now = new Date();
-            const endsAt = new Date(user.subscriptionEndsAt);
+            const endsAt = new Date(subscriptionEndsAt);
             const diffMs = endsAt.getTime() - now.getTime();
             const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
             
+            console.log('[Dashboard] Subscription days left:', diffDays);
+            
             setSubscriptionInfo({
-                endsAt: user.subscriptionEndsAt,
+                endsAt: subscriptionEndsAt,
                 daysLeft: diffDays,
                 isExpired: diffDays < 0
             });
+        } else {
+            console.log('[Dashboard] No subscription info found in user object');
         }
     }, [isSuperadmin, user]);
 
