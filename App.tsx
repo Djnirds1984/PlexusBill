@@ -1,9 +1,9 @@
-
 import React, { useState, useMemo, useEffect, useCallback, Suspense } from 'react';
 import { Sidebar } from './components/Sidebar.tsx';
 import { TopBar } from './components/TopBar.tsx';
 import { Loader } from './components/Loader.tsx';
 import { AuthLayout } from './components/AuthLayout.tsx';
+import { SubscriptionExpiredOverlay } from './components/SubscriptionExpiredOverlay.tsx';
 import { useRouters } from './hooks/useRouters.ts';
 import { useSalesData } from './hooks/useSalesData.ts';
 import { useInventoryData } from './hooks/useInventoryData.ts';
@@ -109,7 +109,11 @@ const AppContent: React.FC<AppContentProps> = ({ licenseStatus, onLicenseChange 
   const [isSidebarOpen, setIsSidebarOpen] = useState(isLargeScreen);
   const [selectedRouterId, setSelectedRouterId] = useState<string | null>(null);
   
-  const { hasPermission } = useAuth();
+  // Check subscription expiry
+  const [isSubscriptionExpired, setIsSubscriptionExpired] = useState(false);
+  const [subscriptionEndsAt, setSubscriptionEndsAt] = useState<string | null>(null);
+  
+  const { user, hasPermission } = useAuth();
   const { routers, addRouter, updateRouter, deleteRouter, isLoading: isLoadingRouters } = useRouters();
   const { sales, addSale, deleteSale, clearSales } = useSalesData(
     selectedRouterId,
@@ -192,6 +196,32 @@ const AppContent: React.FC<AppContentProps> = ({ licenseStatus, onLicenseChange 
         setSelectedRouterId(routers.length > 0 ? routers[0].id : null);
     }
   }, [routers, selectedRouterId]);
+
+  // Check subscription expiry status
+  useEffect(() => {
+    // Only check for tenant users (not superadmin)
+    const tenantSlug = localStorage.getItem('tenantSlug');
+    if (!tenantSlug || !user) {
+      setIsSubscriptionExpired(false);
+      return;
+    }
+
+    // Check if user object has subscription expiry info
+    const userStr = localStorage.getItem('user');
+    if (userStr) {
+      try {
+        const userData = JSON.parse(userStr);
+        if (userData.isSubscriptionExpired) {
+          setIsSubscriptionExpired(true);
+          setSubscriptionEndsAt(userData.subscriptionEndsAt || null);
+        } else {
+          setIsSubscriptionExpired(false);
+        }
+      } catch (e) {
+        console.error('Failed to parse user data for subscription check:', e);
+      }
+    }
+  }, [user]);
 
   const selectedRouter = useMemo(
     () => routers.find(r => r.id === selectedRouterId) || null,
@@ -320,7 +350,13 @@ const AppContent: React.FC<AppContentProps> = ({ licenseStatus, onLicenseChange 
   };
 
   return (
-    <div className="flex bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 min-h-screen">
+    <>
+      {/* Subscription Expired Overlay - Blocks all interaction */}
+      {isSubscriptionExpired && (
+        <SubscriptionExpiredOverlay subscriptionEndsAt={subscriptionEndsAt} />
+      )}
+      
+      <div className="flex bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 min-h-screen" style={{ filter: isSubscriptionExpired ? 'grayscale(100%)' : 'none', pointerEvents: isSubscriptionExpired ? 'none' : 'auto' }}>
       <Sidebar 
         currentView={currentView} 
         setCurrentView={setCurrentView} 
@@ -355,6 +391,7 @@ const AppContent: React.FC<AppContentProps> = ({ licenseStatus, onLicenseChange 
         <Help currentView={currentView} selectedRouter={selectedRouter} />
       </Suspense>
     </div>
+    </>
   );
 };
 

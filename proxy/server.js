@@ -1359,13 +1359,20 @@ async function startServer() {
                 tenantSlug: tenant.slug
             }, SECRET_KEY, { expiresIn: '24h' });
             
+            // Check subscription expiry
+            const now = new Date();
+            const subscriptionEndsAt = tenant.subscription_ends_at ? new Date(tenant.subscription_ends_at) : null;
+            const isSubscriptionExpired = subscriptionEndsAt && now > subscriptionEndsAt;
+            
             res.json({
                 token,
                 user: {
                     id: user.id,
                     username: user.username,
                     role: { id: user.role_id, name: user.role_name },
-                    permissions: permList
+                    permissions: permList,
+                    subscriptionEndsAt: tenant.subscription_ends_at,
+                    isSubscriptionExpired: !!isSubscriptionExpired
                 }
             });
             
