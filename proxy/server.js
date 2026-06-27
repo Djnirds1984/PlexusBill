@@ -9410,6 +9410,7 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
         'proxy/superadmin.db',
         'proxy/superadmin.db-shm',
         'proxy/superadmin.db-wal',
+        'proxy/tenant-databases',
         'proxy/.env',
         'proxy/.device-id',
         'proxy/ngrok-config.json',
