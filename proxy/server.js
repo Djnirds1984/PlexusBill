@@ -1349,6 +1349,18 @@ async function startServer() {
             
             const permList = permissions.map(p => p.name);
             
+            // Check subscription expiry BEFORE creating JWT
+            const now = new Date();
+            const subscriptionEndsAt = tenant.subscription_ends_at ? new Date(tenant.subscription_ends_at) : null;
+            const isSubscriptionExpired = subscriptionEndsAt && now > subscriptionEndsAt;
+            
+            console.log(`[Tenant Login] Tenant subscription info for ${tenantSlug}:`, {
+                subscription_ends_at: tenant.subscription_ends_at,
+                subscription_tier: tenant.subscription_tier,
+                calculatedEndsAt: subscriptionEndsAt,
+                isExpired: isSubscriptionExpired
+            });
+            
             // Generate JWT token WITH tenant context
             const token = jwt.sign({
                 id: user.id,
@@ -1360,18 +1372,6 @@ async function startServer() {
                 subscriptionEndsAt: tenant.subscription_ends_at,
                 isSubscriptionExpired: !!isSubscriptionExpired
             }, SECRET_KEY, { expiresIn: '24h' });
-            
-            // Check subscription expiry
-            const now = new Date();
-            const subscriptionEndsAt = tenant.subscription_ends_at ? new Date(tenant.subscription_ends_at) : null;
-            const isSubscriptionExpired = subscriptionEndsAt && now > subscriptionEndsAt;
-            
-            console.log(`[Tenant Login] Tenant subscription info for ${tenantSlug}:`, {
-                subscription_ends_at: tenant.subscription_ends_at,
-                subscription_tier: tenant.subscription_tier,
-                calculatedEndsAt: subscriptionEndsAt,
-                isExpired: isSubscriptionExpired
-            });
             
             res.json({
                 token,
