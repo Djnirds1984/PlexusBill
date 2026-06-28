@@ -543,6 +543,8 @@ async function initDb() {
                 salt TEXT NOT NULL,
                 router_id TEXT,
                 pppoe_username TEXT,
+                account_number TEXT,
+                tenant_slug TEXT,
                 created_at TEXT
             );
             CREATE TABLE IF NOT EXISTS applications (
@@ -699,6 +701,9 @@ async function initDb() {
             const clientUserColNames = clientUserCols.map(c => c.name);
             if (!clientUserColNames.includes('account_number')) {
                 await db.exec("ALTER TABLE client_users ADD COLUMN account_number TEXT");
+            }
+            if (!clientUserColNames.includes('tenant_slug')) {
+                await db.exec("ALTER TABLE client_users ADD COLUMN tenant_slug TEXT");
             }
         } catch (_) {}
         try {
