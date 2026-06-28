@@ -269,6 +269,24 @@ async function initializeTenantSchema(db) {
         -- Ensure tenant_slug and account_number columns exist (for existing tenant databases)
         ALTER TABLE client_users ADD COLUMN tenant_slug TEXT;
         ALTER TABLE client_users ADD COLUMN account_number TEXT;
+        
+        CREATE TABLE IF NOT EXISTS ppp_grace (
+            router_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            activated_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            original_profile TEXT,
+            original_plan_type TEXT,
+            non_payment_profile TEXT,
+            metadata TEXT,
+            UNIQUE(router_id, name)
+        );
+        
+        -- Ensure ppp_grace columns exist (for existing tenant databases)
+        ALTER TABLE ppp_grace ADD COLUMN non_payment_profile TEXT;
+        ALTER TABLE ppp_grace ADD COLUMN original_plan_type TEXT;
+        ALTER TABLE ppp_grace ADD COLUMN metadata TEXT;
+        
         CREATE TABLE IF NOT EXISTS applications (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
