@@ -8770,7 +8770,7 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
 
     app.use('/api/client-portal', clientPortalRouter);
 
-    // Public Client Login - Search all tenant databases
+    // Public Client Login - Search all tenant databases, fallback to main panel.db
     app.post('/api/public/client-portal/login', async (req, res) => {
         const { username, password } = req.body;
         if (!username || !password) return res.status(400).json({ message: 'Credentials required' });
@@ -8825,8 +8825,25 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
                 }
             }
             
+            // Fallback: Search main panel.db if not found in tenant databases
             if (!foundUser) {
-                console.log(`[Client Portal Login] ✗ User "${username}" not found in any tenant database`);
+                console.log(`[Client Portal Login] ✗ User "${username}" not found in tenant databases, checking main database...`);
+                
+                const user = await db.get(
+                    'SELECT * FROM client_users WHERE username = ?',
+                    [username]
+                );
+                
+                if (user) {
+                    console.log(`[Client Portal Login] ✓ Found user "${username}" in main database`);
+                    foundUser = user;
+                    foundTenantDb = db; // Use main database
+                    foundTenantSlug = null; // Not a tenant user
+                }
+            }
+            
+            if (!foundUser) {
+                console.log(`[Client Portal Login] ✗ User "${username}" not found in any database`);
                 return res.status(401).json({ message: 'Invalid credentials' });
             }
             
@@ -8913,8 +8930,10 @@ body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; color: #3
                 console.error('[Client Portal Login] Error loading company settings:', err.message);
             }
             
-            // Close tenant database connection
-            await new Promise((resolve) => foundTenantDb.close(resolve));
+            // Close tenant database connection ONLY if it's not the main db
+            if (foundTenantDb !== db) {
+                await new Promise((resolve) => foundTenantDb.close(resolve));
+            }
             
             // Return customer data with tenant context
             res.json({
