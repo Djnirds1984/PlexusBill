@@ -1055,6 +1055,112 @@ async function startServer() {
     // Run migration
     await migrateExistingTenants();
     
+    // --- MIGRATION: Add missing columns to client_users table ---
+    async function migrateClientUsersColumns() {
+        try {
+            console.log('[Migration] Checking client_users columns in existing tenant databases...');
+            
+            // Get all tenants
+            const tenants = await superadminDb.all('SELECT id, slug, database_path FROM tenants WHERE status = ?', ['active']);
+            
+            console.log(`[Migration] Found ${tenants.length} active tenants to check`);
+            
+            for (const tenant of tenants) {
+                try {
+                    const sqlite3 = require('sqlite3').verbose();
+                    const tenantDb = new sqlite3.Database(tenant.database_path);
+                    
+                    // Check if client_users table exists
+                    const tableExists = await new Promise((resolve, reject) => {
+                        tenantDb.get(
+                            "SELECT name FROM sqlite_master WHERE type='table' AND name='client_users'",
+                            (err, row) => {
+                                if (err) reject(err);
+                                else resolve(!!row);
+                            }
+                        );
+                    });
+                    
+                    if (tableExists) {
+                        // Get existing columns
+                        const columns = await new Promise((resolve, reject) => {
+                            tenantDb.all(
+                                "PRAGMA table_info(client_users)",
+                                (err, rows) => {
+                                    if (err) reject(err);
+                                    else resolve(rows.map(r => r.name));
+                                }
+                            );
+                        });
+                        
+                        // Add tenant_slug column if missing
+                        if (!columns.includes('tenant_slug')) {
+                            console.log(`[Migration] Adding tenant_slug column to client_users in tenant: ${tenant.slug}`);
+                            await new Promise((resolve, reject) => {
+                                tenantDb.run('ALTER TABLE client_users ADD COLUMN tenant_slug TEXT', (err) => {
+                                    if (err) reject(err);
+                                    else resolve();
+                                });
+                            });
+                            console.log(`[Migration] ✓ tenant_slug column added to tenant: ${tenant.slug}`);
+                        }
+                        
+                        // Add account_number column if missing
+                        if (!columns.includes('account_number')) {
+                            console.log(`[Migration] Adding account_number column to client_users in tenant: ${tenant.slug}`);
+                            await new Promise((resolve, reject) => {
+                                tenantDb.run('ALTER TABLE client_users ADD COLUMN account_number TEXT', (err) => {
+                                    if (err) reject(err);
+                                    else resolve();
+                                });
+                            });
+                            console.log(`[Migration] ✓ account_number column added to tenant: ${tenant.slug}`);
+                        }
+                        
+                        // Backfill tenant_slug for existing records
+                        const recordsWithoutSlug = await new Promise((resolve, reject) => {
+                            tenantDb.all(
+                                'SELECT id FROM client_users WHERE tenant_slug IS NULL OR tenant_slug = ?',
+                                [''],
+                                (err, rows) => {
+                                    if (err) reject(err);
+                                    else resolve(rows);
+                                }
+                            );
+                        });
+                        
+                        if (recordsWithoutSlug.length > 0) {
+                            console.log(`[Migration] Backfilling tenant_slug for ${recordsWithoutSlug.length} records in tenant: ${tenant.slug}`);
+                            await new Promise((resolve, reject) => {
+                                tenantDb.run(
+                                    "UPDATE client_users SET tenant_slug = ? WHERE tenant_slug IS NULL OR tenant_slug = ''",
+                                    [tenant.slug],
+                                    (err) => {
+                                        if (err) reject(err);
+                                        else resolve();
+                                    }
+                                );
+                            });
+                            console.log(`[Migration] ✓ Backfilled tenant_slug for ${recordsWithoutSlug.length} records in tenant: ${tenant.slug}`);
+                        }
+                    }
+                    
+                    // Close database connection
+                    await new Promise((resolve) => tenantDb.close(resolve));
+                } catch (err) {
+                    console.error(`[Migration] Error migrating client_users for tenant ${tenant.slug}:`, err.message);
+                }
+            }
+            
+            console.log('[Migration] Client users column migration completed');
+        } catch (err) {
+            console.error('[Migration] Failed to migrate client_users columns:', err.message);
+        }
+    }
+    
+    // Run client users migration
+    await migrateClientUsersColumns();
+    
     const app = express();
 
     // --- DEV PROXY MIDDLEWARE FOR API BACKEND ---
