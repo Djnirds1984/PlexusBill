@@ -956,6 +956,105 @@ const requireSuperadminOrAdmin = (req, res, next) => {
 // --- Main Application Logic ---
 async function startServer() {
     await Promise.all([initDb(), initSuperadminDb()]);
+    
+    // --- MIGRATION: Add ppp_grace table to all existing tenant databases ---
+    async function migrateExistingTenants() {
+        try {
+            console.log('[Migration] Checking for existing tenant databases...');
+            
+            // Get all tenants
+            const tenants = await superadminDb.all('SELECT id, slug, database_path FROM tenants WHERE status = ?', ['active']);
+            
+            console.log(`[Migration] Found ${tenants.length} active tenants to check`);
+            
+            for (const tenant of tenants) {
+                try {
+                    const sqlite3 = require('sqlite3').verbose();
+                    const tenantDb = new sqlite3.Database(tenant.database_path);
+                    
+                    // Check if ppp_grace table exists
+                    const tableExists = await new Promise((resolve, reject) => {
+                        tenantDb.get(
+                            "SELECT name FROM sqlite_master WHERE type='table' AND name='ppp_grace'",
+                            (err, row) => {
+                                if (err) reject(err);
+                                else resolve(!!row);
+                            }
+                        );
+                    });
+                    
+                    if (!tableExists) {
+                        console.log(`[Migration] Adding ppp_grace table to tenant: ${tenant.slug}`);
+                        
+                        // Create ppp_grace table
+                        await new Promise((resolve, reject) => {
+                            tenantDb.exec(`
+                                CREATE TABLE IF NOT EXISTS ppp_grace (
+                                    router_id TEXT NOT NULL,
+                                    name TEXT NOT NULL,
+                                    activated_at TEXT NOT NULL,
+                                    expires_at TEXT NOT NULL,
+                                    original_profile TEXT,
+                                    original_plan_type TEXT,
+                                    non_payment_profile TEXT,
+                                    metadata TEXT,
+                                    UNIQUE(router_id, name)
+                                );
+                            `, (err) => {
+                                if (err) reject(err);
+                                else resolve();
+                            });
+                        });
+                        
+                        // Add missing columns if table already existed
+                        try {
+                            await new Promise((resolve, reject) => {
+                                tenantDb.run('ALTER TABLE ppp_grace ADD COLUMN non_payment_profile TEXT', (err) => {
+                                    if (err && !err.message.includes('duplicate')) console.log(`[Migration] Column non_payment_profile may already exist`);
+                                    resolve();
+                                });
+                            });
+                        } catch (e) {}
+                        
+                        try {
+                            await new Promise((resolve, reject) => {
+                                tenantDb.run('ALTER TABLE ppp_grace ADD COLUMN original_plan_type TEXT', (err) => {
+                                    if (err && !err.message.includes('duplicate')) console.log(`[Migration] Column original_plan_type may already exist`);
+                                    resolve();
+                                });
+                            });
+                        } catch (e) {}
+                        
+                        try {
+                            await new Promise((resolve, reject) => {
+                                tenantDb.run('ALTER TABLE ppp_grace ADD COLUMN metadata TEXT', (err) => {
+                                    if (err && !err.message.includes('duplicate')) console.log(`[Migration] Column metadata may already exist`);
+                                    resolve();
+                                });
+                            });
+                        } catch (e) {}
+                        
+                        console.log(`[Migration] ✓ ppp_grace table added to tenant: ${tenant.slug}`);
+                    } else {
+                        console.log(`[Migration] ✓ ppp_grace table already exists in tenant: ${tenant.slug}`);
+                    }
+                    
+                    // Close database connection
+                    await new Promise((resolve) => tenantDb.close(resolve));
+                } catch (err) {
+                    console.error(`[Migration] Error migrating tenant ${tenant.slug}:`, err.message);
+                }
+            }
+            
+            console.log('[Migration] Tenant database migration completed');
+        } catch (err) {
+            console.error('[Migration] Failed to migrate tenant databases:', err.message);
+        }
+    }
+    
+    // Run migration
+    await migrateExistingTenants();
+    
     const app = express();
 
     // --- DEV PROXY MIDDLEWARE FOR API BACKEND ---
