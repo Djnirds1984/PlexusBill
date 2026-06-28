@@ -1681,7 +1681,6 @@ export const SystemSettings: React.FC = () => {
         { id: 'paymongo', label: 'PayMongo', icon: <PayMongoIcon className="w-5 h-5" /> },
         { id: 'xendit', label: 'Xendit', icon: <XenditIcon className="w-5 h-5" /> },
         { id: 'facebook', label: 'Messenger', icon: <FacebookIcon className="w-5 h-5" /> },
-        { id: 'landing-page', label: 'Landing Page', icon: <GlobeIcon className="w-5 h-5" /> },
     ];
     
     const renderContent = () => {
@@ -1695,7 +1694,6 @@ export const SystemSettings: React.FC = () => {
             case 'paymongo': return <PayMongoTab settings={settings} setSettings={setSettings} />;
             case 'xendit': return <XenditTab settings={settings} setSettings={setSettings} />;
             case 'facebook': return <FacebookMessengerTab settings={settings} setSettings={setSettings} />;
-            case 'landing-page': return <LandingPageTab settings={settings} setSettings={setSettings} />;
             default: return null;
         }
     };
